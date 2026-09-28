@@ -1164,8 +1164,12 @@ function restoreExactSession() {
   }
 }
 
+function sessionStem(title) {
+  return String(title || "proyecto").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "proyecto";
+}
+
 function uniqueSessionId(title) {
-  const stem = String(title || "proyecto").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "proyecto";
+  const stem = sessionStem(title);
   let candidate = stem;
   let suffix = 2;
   while (data.sessions.some((session) => session.id === candidate)) candidate = `${stem}-${suffix++}`;
@@ -1196,8 +1200,9 @@ function createNewSession(event) {
   stopLivePreview(true);
   closeSourceEditor();
   audio.currentTime = 0;
+  const placeholder = data.sessions.find((candidate) => !candidate.master && sessionStem(candidate.title) === sessionStem(title));
   const session = {
-    id: uniqueSessionId(title),
+    id: placeholder?.id || uniqueSessionId(title),
     title,
     subtitle: "Proyecto personal",
     duration,
@@ -1212,7 +1217,8 @@ function createNewSession(event) {
     custom: true,
   };
   applySessionDefaults(session);
-  data.sessions.push(session);
+  if (placeholder) Object.assign(placeholder, session);
+  else data.sessions.push(session);
   state.sessionId = session.id;
   state.selectedIndex = 0;
   state.selectedEventId = null;
