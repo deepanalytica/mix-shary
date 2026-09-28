@@ -29,6 +29,9 @@ const sourceInInput = document.querySelector("#source-in-input");
 const sourceOutInput = document.querySelector("#source-out-input");
 const previewSourceButton = document.querySelector("#preview-source-button");
 const libraryList = document.querySelector("#library-list");
+const selectAllSourcesButton = document.querySelector("#select-all-sources");
+const autoMixButton = document.querySelector("#auto-mix-button");
+const autoMixCount = document.querySelector("#auto-mix-count");
 const audioUpload = document.querySelector("#audio-upload");
 const sessionPackageInput = document.querySelector("#session-package-input");
 const toast = document.querySelector("#toast");
@@ -102,6 +105,7 @@ const livePreview = {
 let spectrumAnimation = 0;
 const spectrumHistory = [];
 const historyBySession = new Map();
+const selectedLibrarySources = new Set();
 let historyApplying = false;
 
 const state = {
@@ -774,6 +778,117 @@ function snapSourceCutToBeat() {
   showToast("Corte ajustado exactamente a la cuadrícula de beats");
 }
 
+function percentileValue(values, percentile) {
+  if (!values.length) return -60;
+  const ordered = [...values].sort((a, b) => a - b);
+  return ordered[Math.min(ordered.length - 1, Math.max(0, Math.round((ordered.length - 1) * percentile)))];
+}
+
+function analyzeAudioStructure(buffer) {
+  const channel = buffer.getChannelData(0);
+  const frameSeconds = 0.5;
+  const frameSamples = Math.max(1, Math.floor(buffer.sampleRate * frameSeconds));
+  const stride = Math.max(1, Math.floor(frameSamples / 1800));
+  const frames = [];
+  for (let offset = 0; offset < channel.length; offset += frameSamples) {
+    const end = Math.min(channel.length, offset + frameSamples);
+    let sumSquares = 0;
+    let crossings = 0;
+    let count = 0;
+    let previous = channel[offset] || 0;
+    for (let sample = offset; sample < end; sample += stride) {
+      const value = channel[sample];
+      sumSquares += value * value;
+      if ((value >= 0) !== (previous >= 0)) crossings += 1;
+      previous = value;
+      count += 1;
+    }
+    const rms = Math.sqrt(sumSquares / Math.max(1, count));
+    frames.push({
+      start: offset / buffer.sampleRate,
+      rmsDb: 20 * Math.log10(Math.max(1e-6, rms)),
+      zcr: crossings / Math.max(1, count),
+    });
+  }
+  const levels = frames.map((frame) => frame.rmsDb);
+  const activeMedian = percentileValue(levels, 0.62);
+  const silenceThreshold = clamp(activeMedian - 22, -58, -38);
+  const activeLevels = levels.filter((level) => level > silenceThreshold);
+  const rmsDb = activeLevels.length ? activeLevels.reduce((sum, value) => sum + value, 0) / activeLevels.length : -30;
+  const silences = [];
+  let silenceStart = null;
+  frames.forEach((frame, index) => {
+    if (frame.rmsDb <= silenceThreshold && silenceStart === null) silenceStart = frame.start;
+    const closes = frame.rmsDb > silenceThreshold || index === frames.length - 1;
+    if (silenceStart !== null && closes) {
+      const end = frame.rmsDb > silenceThreshold ? frame.start : Math.min(buffer.duration, frame.start + frameSeconds);
+      if (end - silenceStart >= 1.5) silences.push({ start: roundTime(silenceStart), end: roundTime(end) });
+      silenceStart = null;
+    }
+  });
+  const scenes = [];
+  let lastScene = 0;
+  for (let index = 2; index < frames.length; index += 1) {
+    const energyJump = Math.abs(frames[index].rmsDb - frames[index - 2].rmsDb);
+    const textureJump = Math.abs(frames[index].zcr - frames[index - 2].zcr);
+    if ((energyJump > 7 || textureJump > 0.085) && frames[index].start - lastScene >= 7) {
+      scenes.push(roundTime(frames[index].start));
+      lastScene = frames[index].start;
+    }
+  }
+  const activeThreshold = activeMedian - 5;
+  let introEnd = 0;
+  for (let index = 0; index < frames.length - 3; index += 1) {
+    if (frames.slice(index, index + 4).every((frame) => frame.rmsDb > activeThreshold)) {
+      introEnd = frames[index].start;
+      break;
+    }
+  }
+  const windowFrames = Math.max(12, Math.round(12 / frameSeconds));
+  const stepFrames = Math.max(4, Math.round(4 / frameSeconds));
+  const windows = [];
+  for (let index = 0; index + windowFrames <= frames.length; index += stepFrames) {
+    const slice = frames.slice(index, index + windowFrames);
+    const mean = slice.reduce((sum, frame) => sum + frame.rmsDb, 0) / slice.length;
+    const zcr = slice.reduce((sum, frame) => sum + frame.zcr, 0) / slice.length;
+    const shape = Array.from({ length: 6 }, (_, bin) => {
+      const binSlice = slice.slice(bin * 4, bin * 4 + 4);
+      return binSlice.reduce((sum, frame) => sum + frame.rmsDb, 0) / Math.max(1, binSlice.length);
+    });
+    windows.push({ start: frames[index].start, mean, zcr, shape });
+  }
+  let chorusCandidate = null;
+  let bestScore = -Infinity;
+  windows.forEach((first, firstIndex) => {
+    windows.slice(firstIndex + 1).forEach((second) => {
+      if (second.start - first.start < 16) return;
+      const shapeDifference = first.shape.reduce((sum, value, index) => sum + Math.abs(value - second.shape[index]), 0) / first.shape.length;
+      const textureDifference = Math.abs(first.zcr - second.zcr) * 120;
+      const similarity = clamp(1 - (shapeDifference + textureDifference) / 11, 0, 1);
+      const energy = clamp((Math.max(first.mean, second.mean) - activeMedian + 8) / 14, 0, 1);
+      const score = similarity * 0.7 + energy * 0.3;
+      if (score > bestScore) {
+        bestScore = score;
+        const chosen = first.mean >= second.mean ? first : second;
+        chorusCandidate = { start: roundTime(chosen.start), end: roundTime(Math.min(buffer.duration, chosen.start + 12)), confidence: score };
+      }
+    });
+  });
+  const bestFrame = frames.reduce((best, frame) => frame.rmsDb > best.rmsDb ? frame : best, frames[0] || { start: 0, rmsDb: -60 });
+  const bestStart = clamp(bestFrame.start - 6, Math.min(buffer.duration, introEnd), Math.max(0, buffer.duration - 12));
+  return {
+    version: 1,
+    rmsDb: roundTime(rmsDb),
+    silenceThreshold: roundTime(silenceThreshold),
+    silences: silences.slice(0, 12),
+    scenes: scenes.slice(0, 16),
+    introEnd: roundTime(introEnd),
+    longIntro: introEnd >= 8,
+    chorus: chorusCandidate && chorusCandidate.confidence >= 0.56 ? chorusCandidate : null,
+    bestSection: { start: roundTime(bestStart), end: roundTime(Math.min(buffer.duration, bestStart + 18)) },
+  };
+}
+
 async function registerImportedFile(record, addToTimeline = false) {
   const context = ensureAudioContext();
   const decoded = await context.decodeAudioData(await record.blob.arrayBuffer());
@@ -788,6 +903,7 @@ async function registerImportedFile(record, addToTimeline = false) {
     duration: decoded.duration,
     waveform: peaksFromBuffer(decoded),
     bpm: estimateBpm(decoded),
+    analysis: analyzeAudioStructure(decoded),
     imported: true,
     recordId: record.id,
   };
@@ -811,15 +927,159 @@ function renderLibrary() {
   document.querySelector("#library-count").textContent = `${entries.length} canciones`;
   libraryList.innerHTML = "";
   entries.forEach(([key, source]) => {
-    const button = document.createElement("button");
-    button.className = "library-item";
-    button.type = "button";
+    const item = document.createElement("div");
+    const selected = selectedLibrarySources.has(key);
+    const sourceColor = TRACK_COLORS[entries.findIndex(([entryKey]) => entryKey === key) % TRACK_COLORS.length];
+    item.className = `library-item${selected ? " selected" : ""}`;
+    item.style.setProperty("--source-color", sourceColor);
     const origin = key === "voice" ? "ORIGINAL COMPLETA · " : source.imported ? "SUBIDA · " : "FUENTE · ";
-    button.innerHTML = `<span><strong>${source.name}</strong><small>${origin}${formatTime(source.duration, false)}${source.bpm ? ` · ${source.bpm} BPM` : ""}</small></span><span class="library-add">+</span>`;
-    button.title = "Añadir esta canción a la línea de tiempo";
-    button.addEventListener("click", () => addSourceToTimeline(key));
-    libraryList.appendChild(button);
+    const analysisTags = [];
+    if (source.analysis?.chorus) analysisTags.push("Estribillo probable");
+    if (source.analysis?.longIntro) analysisTags.push(`Intro ${formatTime(source.analysis.introEnd, false)}`);
+    if (source.analysis?.silences?.length) analysisTags.push(`${source.analysis.silences.length} silencio${source.analysis.silences.length === 1 ? "" : "s"}`);
+    if (source.imported && !source.analysis) analysisTags.push("Analizando…");
+    item.innerHTML = `<button class="library-select" type="button" aria-pressed="${selected}" aria-label="${selected ? "Quitar" : "Seleccionar"} ${escapeMarkup(source.name)}">✓</button><button class="library-info" type="button" title="Añadir esta canción a la línea de tiempo"><strong>${escapeMarkup(source.name)}</strong><small>${origin}${formatTime(source.duration, false)}${source.bpm ? ` · ${source.bpm} BPM` : ""}</small>${analysisTags.length ? `<span class="library-analysis">${analysisTags.map((tag) => `<i>${escapeMarkup(tag)}</i>`).join("")}</span>` : ""}</button><button class="library-add" type="button" aria-label="Añadir ${escapeMarkup(source.name)} a la línea de tiempo">+</button>`;
+    item.querySelector(".library-select").addEventListener("click", () => toggleLibrarySource(key));
+    item.querySelector(".library-info").addEventListener("click", () => addSourceToTimeline(key));
+    item.querySelector(".library-add").addEventListener("click", () => addSourceToTimeline(key));
+    libraryList.appendChild(item);
   });
+  updateAutoMixControls();
+}
+
+function toggleLibrarySource(key) {
+  if (selectedLibrarySources.has(key)) selectedLibrarySources.delete(key);
+  else selectedLibrarySources.add(key);
+  renderLibrary();
+}
+
+function updateAutoMixControls() {
+  const availableKeys = Object.keys(data.library);
+  const selectedCount = availableKeys.filter((key) => selectedLibrarySources.has(key)).length;
+  const allSelected = availableKeys.length > 0 && selectedCount === availableKeys.length;
+  selectAllSourcesButton.setAttribute("aria-pressed", String(allSelected));
+  selectAllSourcesButton.textContent = allSelected ? "Quitar todas" : "Seleccionar todas";
+  autoMixButton.disabled = selectedCount === 0;
+  autoMixCount.textContent = selectedCount ? `${selectedCount} ${selectedCount === 1 ? "canción" : "canciones"}` : "Elige canciones";
+}
+
+function toggleAllLibrarySources() {
+  const keys = Object.keys(data.library);
+  const allSelected = keys.length > 0 && keys.every((key) => selectedLibrarySources.has(key));
+  selectedLibrarySources.clear();
+  if (!allSelected) keys.forEach((key) => selectedLibrarySources.add(key));
+  renderLibrary();
+}
+
+function sourceSectionForAutoMix(source, requestedDuration) {
+  const analysis = source.analysis;
+  const preferred = analysis?.chorus || analysis?.bestSection || { start: 0, end: source.duration };
+  const duration = Math.min(requestedDuration, source.duration);
+  let start = clamp(preferred.start || 0, 0, Math.max(0, source.duration - duration));
+  if (analysis?.longIntro && start < analysis.introEnd) start = clamp(analysis.introEnd, 0, Math.max(0, source.duration - duration));
+  const overlappingSilence = analysis?.silences?.find((silence) => silence.start < start + duration - 1 && silence.end > start + 1);
+  if (overlappingSilence) start = clamp(overlappingSilence.end + 0.15, 0, Math.max(0, source.duration - duration));
+  return { start: roundTime(start), end: roundTime(start + duration), label: analysis?.chorus ? "Estribillo probable" : analysis?.bestSection ? "Zona de energía" : "Selección automática" };
+}
+
+function createAutomaticMix() {
+  const keys = Object.keys(data.library).filter((key) => selectedLibrarySources.has(key));
+  if (!keys.length) return;
+  saveDraft();
+  audio.pause();
+  stopLivePreview(true);
+  closeSourceEditor();
+  const previousSession = currentSession();
+  const duration = Math.max(30, previousSession.duration || 180);
+  const overlap = keys.length > 1 ? 0.65 : 0;
+  const requestedDuration = (duration + overlap * Math.max(0, keys.length - 1)) / keys.length;
+  const title = `Mix automático · ${new Date().toLocaleDateString("es-CL", { day: "2-digit", month: "short" })}`;
+  const session = {
+    id: uniqueSessionId(title),
+    title,
+    subtitle: "Mix asistido · listo para revisar y ensayar",
+    duration,
+    status: "Borrador",
+    version: "Auto Mix local",
+    master: "local:",
+    rehearsal: "local:",
+    waveform: Array.from({ length: 240 }, () => 0.025),
+    segments: [],
+    events: [],
+    changes: ["Mix automático creado desde canciones seleccionadas", "Silencios largos e intros detectadas se evitaron cuando fue posible", "Ganancia estimada y transiciones aplicadas por pista"],
+    custom: true,
+  };
+  let cursor = 0;
+  keys.forEach((key, index) => {
+    const source = data.library[key];
+    const section = sourceSectionForAutoMix(source, requestedDuration);
+    const clipDuration = section.end - section.start;
+    const start = roundTime(Math.max(0, cursor - (index ? overlap : 0)));
+    const id = createSegmentId(session, `auto-${index + 1}`);
+    const estimatedGain = source.analysis ? clamp(-16 - source.analysis.rmsDb, -5, 6) : 0;
+    const segment = {
+      id,
+      name: source.name,
+      artist: source.artist || "Archivo personal",
+      start,
+      end: roundTime(Math.min(duration, start + clipDuration)),
+      source: `${formatTime(section.start)}–${formatTime(section.end)}`,
+      sourceKey: key,
+      sourceIn: section.start,
+      sourceOut: roundTime(section.start + Math.min(clipDuration, duration - start)),
+      transition: index ? "Crossfade asistido 650 ms" : "Entrada limpia",
+      note: `${section.label}. Nivel estimado para mantener el mix parejo; confirma a oído antes de exportar.`,
+      sectionLabel: section.label,
+      fadeIn: index ? overlap : 0.04,
+      fadeOut: index === keys.length - 1 ? 1.1 : overlap,
+      fadeCurve: "equal-power",
+      gainDb: roundTime(estimatedGain),
+      bpm: source.bpm || 120,
+    };
+    session.segments.push(segment);
+    cursor = segment.end;
+    if (index > 0 && index % 2 === 0) {
+      const previous = session.segments[index - 1];
+      session.events.push({
+        id: `event-auto-${Date.now()}-${index}`,
+        type: "echo",
+        label: "Echo de transición",
+        time: roundTime(Math.max(previous.start, previous.end - 1.2)),
+        duration: 1.2,
+        amount: 0.64,
+        trackId: previous.id,
+        params: { ...defaultEventParams("echo"), mix: 0.48, feedback: 0.34 },
+      });
+    }
+  });
+  const lastSegment = session.segments.at(-1);
+  if (lastSegment) {
+    session.duration = Math.max(30, lastSegment.end);
+    session.events.push({
+      id: `event-auto-end-${Date.now()}`,
+      type: "filter",
+      label: "Cierre suave",
+      time: roundTime(Math.max(lastSegment.start, lastSegment.end - 1.8)),
+      duration: 1.8,
+      amount: 0.58,
+      trackId: lastSegment.id,
+      params: { ...defaultEventParams("filter"), filterMode: "lowpass", startHz: 18000, endHz: 520 },
+    });
+  }
+  applySessionDefaults(session);
+  data.sessions.push(session);
+  state.sessionId = session.id;
+  state.selectedIndex = 0;
+  state.selectedEventId = null;
+  state.resumeTime = 0;
+  state.resumeScrollLeft = 0;
+  audio.currentTime = 0;
+  saveDraft();
+  renderSessions();
+  updateExactSaveUI();
+  renderWorkspace();
+  restoreWorkspaceViewport();
+  showToast(`Mix creado con ${keys.length} ${keys.length === 1 ? "canción" : "canciones"} · el proyecto anterior quedó intacto`);
 }
 
 function addSourceToTimeline(key) {
@@ -1844,7 +2104,9 @@ function positionClip(clip, segment) {
   clip.style.left = `${(segment.start / session.duration) * 100}%`;
   clip.style.width = `${Math.max(0.15, ((segment.end - segment.start) / session.duration) * 100)}%`;
   const small = clip.querySelector("small");
-  if (small) small.textContent = `${formatTime(segment.start, false)}–${formatTime(segment.end, false)} · ${segment.gainDb >= 0 ? "+" : ""}${segment.gainDb.toFixed(1)} dB`;
+  if (small) small.textContent = `${formatTime(segment.start, false)}–${formatTime(segment.end, false)} · ${segment.bpm || 120} BPM · ${segment.gainDb >= 0 ? "+" : ""}${segment.gainDb.toFixed(1)} dB`;
+  const section = clip.querySelector(".clip-section");
+  if (section) section.textContent = segment.sectionLabel || "";
   const duration = Math.max(0.01, segment.end - segment.start);
   const fadeInPercent = (segment.fadeIn / duration) * 100;
   const fadeOutPercent = (segment.fadeOut / duration) * 100;
@@ -2084,8 +2346,9 @@ function renderTimeline() {
       <span class="fade-curve fade-curve-out" data-fade-curve="out"><svg viewBox="0 0 100 30" preserveAspectRatio="none"><path d="M0 2 C48 6 82 29 100 29"/></svg></span>
       <span class="fade-handle fade-handle-in" data-fade="in" aria-label="Ajustar fade in"></span>
       <span class="fade-handle fade-handle-out" data-fade="out" aria-label="Ajustar fade out"></span>
-      <strong>${segment.name}</strong>
+      <strong>${escapeMarkup(segment.name)}</strong>
       <small></small>
+      <span class="clip-section"></span>
       <span class="fade-label fade-label-in" data-fade-label="in"></span>
       <span class="fade-label fade-label-out" data-fade-label="out"></span>
       <span class="trim-handle right" data-trim="right"></span>`;
@@ -3667,6 +3930,8 @@ document.querySelector("#import-button").addEventListener("click", () => {
   state.uploadMode = "add";
   audioUpload.click();
 });
+selectAllSourcesButton.addEventListener("click", toggleAllLibrarySources);
+autoMixButton.addEventListener("click", createAutomaticMix);
 document.querySelector("#replace-source-button").addEventListener("click", () => {
   state.uploadMode = "replace";
   audioUpload.click();
