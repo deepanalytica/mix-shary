@@ -49,6 +49,14 @@ const CUSTOM_SESSIONS_KEY = "mix-shary-custom-sessions-v1";
 const LIBRARY_DB = "mix-shary-audio-library";
 const PACKAGE_MAGIC = "MIXSHARY1";
 const TRACK_COLORS = ["#d5ff3f", "#55d6ff", "#ff7ac8", "#ffb454", "#9f8cff", "#46e0a1", "#ff7474", "#6fa8ff", "#ffe66d", "#4dd4ac", "#ff9f68", "#d68cff"];
+const SECTION_COLORS = {
+  Intro: "#55d6ff",
+  Estrofa: "#9f8cff",
+  "Pre-coro": "#ffb454",
+  Estribillo: "#ff7ac8",
+  Puente: "#46e0a1",
+  Outro: "#6fa8ff",
+};
 const EVENT_TYPES = {
   cue: { label: "Hot cue", short: "CUE", color: "#d5ff3f", duration: 0 },
   echo: { label: "Echo out", short: "ECHO", color: "#55d6ff", duration: 1.5 },
@@ -107,6 +115,7 @@ const spectrumHistory = [];
 const historyBySession = new Map();
 const selectedLibrarySources = new Set();
 const silentTransportUrls = new Map();
+let autoMixCooking = false;
 let historyApplying = false;
 
 const state = {
@@ -157,6 +166,10 @@ function colorForSegment(segment) {
   let hash = 0;
   for (let index = 0; index < key.length; index += 1) hash = ((hash << 5) - hash + key.charCodeAt(index)) | 0;
   return TRACK_COLORS[Math.abs(hash) % TRACK_COLORS.length];
+}
+
+function colorForSection(label, fallback) {
+  return SECTION_COLORS[label] || fallback || "#d5ff3f";
 }
 
 function applySegmentDefaults(session) {
@@ -812,6 +825,62 @@ function percentileValue(values, percentile) {
   return ordered[Math.min(ordered.length - 1, Math.max(0, Math.round((ordered.length - 1) * percentile)))];
 }
 
+function describeMusicalSections(frames, duration, introEnd, scenes, chorusRanges, activeMedian) {
+  const protectedBoundaries = new Set([0, roundTime(duration)]);
+  if (introEnd >= 3 && introEnd <= duration - 5) protectedBoundaries.add(roundTime(introEnd));
+  chorusRanges.forEach((range) => {
+    protectedBoundaries.add(roundTime(range.start));
+    protectedBoundaries.add(roundTime(range.end));
+  });
+  if (duration >= 45) protectedBoundaries.add(roundTime(duration - 9));
+  const salientScenes = [];
+  scenes.filter((time) => time >= 4 && time <= duration - 4).forEach((time) => {
+    if (salientScenes.length < 8 && (!salientScenes.length || time - salientScenes.at(-1) >= 12)) salientScenes.push(time);
+  });
+  salientScenes.forEach((time) => protectedBoundaries.add(roundTime(time)));
+  const rawBoundaries = [...protectedBoundaries].sort((a, b) => a - b);
+  const boundaries = rawBoundaries.filter((time, index) => index === 0 || index === rawBoundaries.length - 1 || time - rawBoundaries[index - 1] >= 3);
+  const sections = [];
+  for (let index = 0; index < boundaries.length - 1; index += 1) {
+    const start = boundaries[index];
+    const end = boundaries[index + 1];
+    if (end - start < 2.5) continue;
+    const localFrames = frames.filter((frame) => frame.start >= start && frame.start < end);
+    const meanDb = localFrames.length ? localFrames.reduce((sum, frame) => sum + frame.rmsDb, 0) / localFrames.length : activeMedian;
+    const chorusOverlap = chorusRanges.reduce((largest, range) => Math.max(largest, Math.max(0, Math.min(end, range.end) - Math.max(start, range.start))), 0);
+    let label = "Estrofa";
+    if (start < Math.max(3, introEnd) && end <= Math.max(5, introEnd + 1)) label = "Intro";
+    else if (chorusOverlap >= Math.min(5, (end - start) * 0.45)) label = "Estribillo";
+    else if (duration - end < 0.8 && start >= duration - 12) label = "Outro";
+    else {
+      const nextChorus = chorusRanges.find((range) => range.start >= end - 0.5);
+      const previousChorus = [...chorusRanges].reverse().find((range) => range.end <= start + 0.5);
+      if (nextChorus && nextChorus.start - end <= 10) label = "Pre-coro";
+      else if (previousChorus && chorusRanges.length > 1 && start > chorusRanges[0].end && end <= chorusRanges.at(-1).start) label = "Puente";
+    }
+    sections.push({
+      label,
+      start: roundTime(start),
+      end: roundTime(end),
+      intensity: roundTime(clamp((meanDb - activeMedian + 10) / 18, 0.16, 1)),
+      meanDb: roundTime(meanDb),
+    });
+  }
+  return sections.reduce((merged, section) => {
+    const previous = merged.at(-1);
+    if (!previous || previous.label !== section.label) {
+      merged.push({ ...section });
+      return merged;
+    }
+    const previousDuration = previous.end - previous.start;
+    const sectionDuration = section.end - section.start;
+    previous.intensity = roundTime((previous.intensity * previousDuration + section.intensity * sectionDuration) / Math.max(0.01, previousDuration + sectionDuration));
+    previous.meanDb = roundTime((previous.meanDb * previousDuration + section.meanDb * sectionDuration) / Math.max(0.01, previousDuration + sectionDuration));
+    previous.end = section.end;
+    return merged;
+  }, []);
+}
+
 function analyzeAudioStructure(buffer) {
   const channel = buffer.getChannelData(0);
   const frameSeconds = 0.5;
@@ -886,6 +955,7 @@ function analyzeAudioStructure(buffer) {
     windows.push({ start: frames[index].start, mean, zcr, shape });
   }
   let chorusCandidate = null;
+  let chorusPair = null;
   let bestScore = -Infinity;
   windows.forEach((first, firstIndex) => {
     windows.slice(firstIndex + 1).forEach((second) => {
@@ -899,11 +969,16 @@ function analyzeAudioStructure(buffer) {
         bestScore = score;
         const chosen = first.mean >= second.mean ? first : second;
         chorusCandidate = { start: roundTime(chosen.start), end: roundTime(Math.min(buffer.duration, chosen.start + 12)), confidence: score };
+        chorusPair = [first, second];
       }
     });
   });
+  const chorusRanges = bestScore >= 0.56 && chorusPair
+    ? chorusPair.map((window) => ({ start: roundTime(window.start), end: roundTime(Math.min(buffer.duration, window.start + 12)), confidence: roundTime(bestScore) })).sort((a, b) => a.start - b.start)
+    : [];
   const bestFrame = frames.reduce((best, frame) => frame.rmsDb > best.rmsDb ? frame : best, frames[0] || { start: 0, rmsDb: -60 });
   const bestStart = clamp(bestFrame.start - 6, Math.min(buffer.duration, introEnd), Math.max(0, buffer.duration - 12));
+  const sections = describeMusicalSections(frames, buffer.duration, introEnd, scenes, chorusRanges, activeMedian);
   return {
     version: 1,
     rmsDb: roundTime(rmsDb),
@@ -913,6 +988,8 @@ function analyzeAudioStructure(buffer) {
     introEnd: roundTime(introEnd),
     longIntro: introEnd >= 8,
     chorus: chorusCandidate && chorusCandidate.confidence >= 0.56 ? chorusCandidate : null,
+    choruses: chorusRanges,
+    sections,
     bestSection: { start: roundTime(bestStart), end: roundTime(Math.min(buffer.duration, bestStart + 18)) },
   };
 }
@@ -965,8 +1042,12 @@ function renderLibrary() {
     if (source.analysis?.chorus) analysisTags.push("Estribillo probable");
     if (source.analysis?.longIntro) analysisTags.push(`Intro ${formatTime(source.analysis.introEnd, false)}`);
     if (source.analysis?.silences?.length) analysisTags.push(`${source.analysis.silences.length} silencio${source.analysis.silences.length === 1 ? "" : "s"}`);
+    if (source.analysis?.sections?.length) analysisTags.push(`${source.analysis.sections.length} secciones`);
     if (source.imported && !source.analysis) analysisTags.push("Analizando…");
-    item.innerHTML = `<button class="library-select" type="button" aria-pressed="${selected}" aria-label="${selected ? "Quitar" : "Seleccionar"} ${escapeMarkup(source.name)}">✓</button><button class="library-info" type="button" title="Añadir esta canción a la línea de tiempo"><strong>${escapeMarkup(source.name)}</strong><small>${origin}${formatTime(source.duration, false)}${source.bpm ? ` · ${source.bpm} BPM` : ""}</small>${analysisTags.length ? `<span class="library-analysis">${analysisTags.map((tag) => `<i>${escapeMarkup(tag)}</i>`).join("")}</span>` : ""}</button><button class="library-add" type="button" aria-label="Añadir ${escapeMarkup(source.name)} a la línea de tiempo">+</button>`;
+    const structureMarkup = source.analysis?.sections?.length
+      ? `<span class="library-structure" aria-label="Estructura musical detectada">${source.analysis.sections.map((section) => `<b style="--section-color:${colorForSection(section.label, sourceColor)};--section-width:${Math.max(2, ((section.end - section.start) / source.duration) * 100)}%;--section-alpha:${clamp(section.intensity, 0.2, 1)}" title="${escapeMarkup(section.label)} · ${formatTime(section.start)}–${formatTime(section.end)}"></b>`).join("")}</span>`
+      : "";
+    item.innerHTML = `<button class="library-select" type="button" aria-pressed="${selected}" aria-label="${selected ? "Quitar" : "Seleccionar"} ${escapeMarkup(source.name)}">✓</button><button class="library-info" type="button" title="Añadir esta canción a la línea de tiempo"><strong>${escapeMarkup(source.name)}</strong><small>${origin}${formatTime(source.duration, false)}${source.bpm ? ` · ${source.bpm} BPM` : ""}</small>${structureMarkup}${analysisTags.length ? `<span class="library-analysis">${analysisTags.map((tag) => `<i>${escapeMarkup(tag)}</i>`).join("")}</span>` : ""}</button><button class="library-add" type="button" aria-label="Añadir ${escapeMarkup(source.name)} a la línea de tiempo">+</button>`;
     item.querySelector(".library-select").addEventListener("click", () => toggleLibrarySource(key));
     item.querySelector(".library-info").addEventListener("click", () => addSourceToTimeline(key));
     item.querySelector(".library-add").addEventListener("click", () => addSourceToTimeline(key));
@@ -987,8 +1068,10 @@ function updateAutoMixControls() {
   const allSelected = availableKeys.length > 0 && selectedCount === availableKeys.length;
   selectAllSourcesButton.setAttribute("aria-pressed", String(allSelected));
   selectAllSourcesButton.textContent = allSelected ? "Quitar todas" : "Seleccionar todas";
-  autoMixButton.disabled = selectedCount === 0;
-  autoMixCount.textContent = selectedCount ? `${selectedCount} ${selectedCount === 1 ? "canción" : "canciones"}` : "Elige canciones";
+  autoMixButton.disabled = selectedCount === 0 || autoMixCooking;
+  autoMixButton.classList.toggle("loading", autoMixCooking);
+  autoMixButton.querySelector("span").textContent = autoMixCooking ? "Analizando" : "Cocinar radio edits";
+  autoMixCount.textContent = autoMixCooking ? "Buscando secciones…" : selectedCount ? `${selectedCount} ${selectedCount === 1 ? "canción" : "canciones"}` : "Elige canciones";
 }
 
 function toggleAllLibrarySources() {
@@ -999,20 +1082,71 @@ function toggleAllLibrarySources() {
   renderLibrary();
 }
 
-function sourceSectionForAutoMix(source, requestedDuration) {
-  const analysis = source.analysis;
-  const preferred = analysis?.chorus || analysis?.bestSection || { start: 0, end: source.duration };
-  const duration = Math.min(requestedDuration, source.duration);
-  let start = clamp(preferred.start || 0, 0, Math.max(0, source.duration - duration));
-  if (analysis?.longIntro && start < analysis.introEnd) start = clamp(analysis.introEnd, 0, Math.max(0, source.duration - duration));
-  const overlappingSilence = analysis?.silences?.find((silence) => silence.start < start + duration - 1 && silence.end > start + 1);
-  if (overlappingSilence) start = clamp(overlappingSilence.end + 0.15, 0, Math.max(0, source.duration - duration));
-  return { start: roundTime(start), end: roundTime(start + duration), label: analysis?.chorus ? "Estribillo probable" : analysis?.bestSection ? "Zona de energía" : "Selección automática" };
+function radioEditSection(source, label, duration, fallbackStart) {
+  const sections = source.analysis?.sections || [];
+  const candidates = sections.filter((section) => section.label === label);
+  let candidate = null;
+  if (label === "Intro") candidate = candidates[0];
+  else if (label === "Estribillo") candidate = [...candidates].sort((a, b) => b.intensity - a.intensity)[0];
+  else candidate = [...candidates].sort((a, b) => b.intensity - a.intensity)[0];
+  const desiredDuration = Math.max(1.8, Math.min(duration, source.duration));
+  let start = candidate?.start ?? fallbackStart;
+  if (candidate && label === "Pre-coro") start = Math.max(candidate.start, candidate.end - desiredDuration);
+  if (label === "Intro" && source.analysis?.longIntro) start = Math.max(start, source.analysis.introEnd);
+  start = clamp(start, 0, Math.max(0, source.duration - desiredDuration));
+  const silence = source.analysis?.silences?.find((range) => range.start < start + desiredDuration - 0.8 && range.end > start + 0.8);
+  if (silence && label !== "Intro") start = clamp(silence.end + 0.12, 0, Math.max(0, source.duration - desiredDuration));
+  return {
+    label,
+    start: roundTime(start),
+    end: roundTime(Math.min(source.duration, start + desiredDuration)),
+    intensity: candidate?.intensity ?? (label === "Estribillo" ? 0.92 : label === "Pre-coro" ? 0.72 : label === "Intro" ? 0.48 : 0.62),
+  };
 }
 
-function createAutomaticMix() {
+function buildRadioEditPlan(source, requestedDuration) {
+  const total = Math.max(8, Math.min(requestedDuration, source.duration));
+  const analysis = source.analysis || {};
+  const chorusStart = analysis.chorus?.start ?? analysis.bestSection?.start ?? clamp(source.duration * 0.42, 8, Math.max(8, source.duration - 12));
+  const firstChorus = analysis.choruses?.[0]?.start ?? chorusStart;
+  const bridgeStart = analysis.choruses?.length > 1
+    ? (analysis.choruses[0].end + analysis.choruses[1].start) / 2
+    : source.duration * 0.66;
+  const specs = total >= 34
+    ? [
+        ["Intro", 0.14, analysis.longIntro ? analysis.introEnd : 0],
+        ["Estrofa", 0.22, Math.max(analysis.introEnd || 0, firstChorus - 26)],
+        ["Pre-coro", 0.12, Math.max(0, firstChorus - total * 0.12)],
+        ["Estribillo", 0.38, chorusStart],
+        ["Puente", 0.14, bridgeStart],
+      ]
+    : [
+        ["Intro", 0.16, analysis.longIntro ? analysis.introEnd : 0],
+        ["Estrofa", 0.24, Math.max(analysis.introEnd || 0, firstChorus - 22)],
+        ["Pre-coro", 0.14, Math.max(0, firstChorus - total * 0.14)],
+        ["Estribillo", 0.46, chorusStart],
+      ];
+  return specs.map(([label, ratio, fallback]) => radioEditSection(source, label, total * ratio, fallback));
+}
+
+async function analyzeSelectedSources(keys) {
+  const results = await Promise.allSettled(keys.map(async (key) => {
+    const source = data.library[key];
+    if (!source.analysis?.sections?.length) {
+      const buffer = await loadPreviewBuffer(source);
+      source.analysis = analyzeAudioStructure(buffer);
+    }
+  }));
+  return results.filter((result) => result.status === "rejected").length;
+}
+
+async function createAutomaticMix() {
   const keys = Object.keys(data.library).filter((key) => selectedLibrarySources.has(key));
   if (!keys.length) return;
+  autoMixCooking = true;
+  updateAutoMixControls();
+  const analysisFailures = await analyzeSelectedSources(keys);
+  renderLibrary();
   saveDraft();
   audio.pause();
   stopLivePreview(true);
@@ -1021,64 +1155,83 @@ function createAutomaticMix() {
   const duration = Math.max(30, previousSession.duration || 180);
   const overlap = keys.length > 1 ? 0.65 : 0;
   const requestedDuration = (duration + overlap * Math.max(0, keys.length - 1)) / keys.length;
-  const title = `Mix automático · ${new Date().toLocaleDateString("es-CL", { day: "2-digit", month: "short" })}`;
+  const title = `Radio edits · ${new Date().toLocaleDateString("es-CL", { day: "2-digit", month: "short" })}`;
   const session = {
     id: uniqueSessionId(title),
     title,
-    subtitle: "Mix asistido · listo para revisar y ensayar",
+    subtitle: "Radio edits asistidos · listo para revisar y ensayar",
     duration,
     status: "Borrador",
-    version: "Auto Mix local",
+    version: "Radio Edit local",
     master: "local:",
     rehearsal: "local:",
     waveform: Array.from({ length: 240 }, () => 0.025),
     segments: [],
     events: [],
-    changes: ["Mix automático creado desde canciones seleccionadas", "Silencios largos e intros detectadas se evitaron cuando fue posible", "Ganancia estimada y transiciones aplicadas por pista"],
+    changes: ["Cada canción se condensó como radio edit", "Intro, estrofa, pre-coro, estribillo y puente se seleccionaron cuando estaban disponibles", "Transiciones, fades y nivel estimado se aplicaron por canción"],
     custom: true,
   };
   let cursor = 0;
+  let previousSongLast = null;
   keys.forEach((key, index) => {
     const source = data.library[key];
-    const section = sourceSectionForAutoMix(source, requestedDuration);
-    const clipDuration = section.end - section.start;
-    const start = roundTime(Math.max(0, cursor - (index ? overlap : 0)));
-    const id = createSegmentId(session, `auto-${index + 1}`);
     const estimatedGain = source.analysis ? clamp(-16 - source.analysis.rmsDb, -5, 6) : 0;
-    const segment = {
-      id,
-      name: source.name,
-      artist: source.artist || "Archivo personal",
-      start,
-      end: roundTime(Math.min(duration, start + clipDuration)),
-      source: `${formatTime(section.start)}–${formatTime(section.end)}`,
-      sourceKey: key,
-      sourceIn: section.start,
-      sourceOut: roundTime(section.start + Math.min(clipDuration, duration - start)),
-      transition: index ? "Crossfade asistido 650 ms" : "Entrada limpia",
-      note: `${section.label}. Nivel estimado para mantener el mix parejo; confirma a oído antes de exportar.`,
-      sectionLabel: section.label,
-      fadeIn: index ? overlap : 0.04,
-      fadeOut: index === keys.length - 1 ? 1.1 : overlap,
-      fadeCurve: "equal-power",
-      gainDb: roundTime(estimatedGain),
-      bpm: source.bpm || 120,
-    };
-    session.segments.push(segment);
-    cursor = segment.end;
-    if (index > 0 && index % 2 === 0) {
-      const previous = session.segments[index - 1];
+    const plan = buildRadioEditPlan(source, requestedDuration);
+    const songStart = roundTime(Math.max(0, cursor - (index ? overlap : 0)));
+    let songCursor = songStart;
+    let firstSongSegment = null;
+    plan.forEach((section, sectionIndex) => {
+      const internalOverlap = sectionIndex ? 0.06 : 0;
+      const start = roundTime(Math.max(songStart, songCursor - internalOverlap));
+      const clipDuration = section.end - section.start;
+      const end = roundTime(Math.min(duration, start + clipDuration));
+      if (end - start < 0.5) return;
+      const id = createSegmentId(session, `radio-${index + 1}-${sectionIndex + 1}`);
+      const segment = {
+        id,
+        name: source.name,
+        artist: source.artist || "Archivo personal",
+        start,
+        end,
+        source: `${formatTime(section.start)}–${formatTime(section.start + end - start)}`,
+        sourceKey: key,
+        sourceIn: section.start,
+        sourceOut: roundTime(section.start + end - start),
+        transition: sectionIndex ? "Corte de radio al beat" : index ? "Crossfade entre canciones" : "Entrada reconocible",
+        note: `${section.label} probable · intensidad ${Math.round(section.intensity * 100)}%. Corte propuesto para conservar una frase reconocible.`,
+        sectionLabel: section.label,
+        sectionIntensity: section.intensity,
+        color: colorForSection(section.label, colorForSegment({ sourceKey: key })),
+        songGroupId: `radio-song-${index + 1}`,
+        fadeIn: sectionIndex ? 0.04 : index ? overlap : 0.04,
+        fadeOut: 0.04,
+        fadeCurve: "equal-power",
+        gainDb: roundTime(estimatedGain),
+        bpm: source.bpm || 120,
+      };
+      session.segments.push(segment);
+      firstSongSegment ||= segment;
+      songCursor = segment.end;
+    });
+    const lastSongSegment = session.segments.at(-1);
+    if (previousSongLast && firstSongSegment) {
+      previousSongLast.fadeOut = overlap;
+      const effectType = index % 2 === 0 ? "echo" : "filter";
       session.events.push({
         id: `event-auto-${Date.now()}-${index}`,
-        type: "echo",
-        label: "Echo de transición",
-        time: roundTime(Math.max(previous.start, previous.end - 1.2)),
-        duration: 1.2,
-        amount: 0.64,
-        trackId: previous.id,
-        params: { ...defaultEventParams("echo"), mix: 0.48, feedback: 0.34 },
+        type: effectType,
+        label: effectType === "echo" ? "Echo entre canciones" : "Filtro entre canciones",
+        time: roundTime(Math.max(previousSongLast.start, previousSongLast.end - 1.1)),
+        duration: 1.1,
+        amount: 0.58,
+        trackId: previousSongLast.id,
+        params: effectType === "echo"
+          ? { ...defaultEventParams("echo"), mix: 0.42, feedback: 0.3 }
+          : { ...defaultEventParams("filter"), filterMode: "lowpass", startHz: 18000, endHz: 900 },
       });
     }
+    previousSongLast = lastSongSegment;
+    cursor = lastSongSegment?.end || cursor;
   });
   const lastSegment = session.segments.at(-1);
   if (lastSegment) {
@@ -1107,7 +1260,10 @@ function createAutomaticMix() {
   updateExactSaveUI();
   renderWorkspace();
   restoreWorkspaceViewport();
-  showToast(`Mix creado con ${keys.length} ${keys.length === 1 ? "canción" : "canciones"} · el proyecto anterior quedó intacto`);
+  autoMixCooking = false;
+  renderLibrary();
+  const warning = analysisFailures ? ` · ${analysisFailures} sin análisis completo` : "";
+  showToast(`Radio edit creado con ${keys.length} ${keys.length === 1 ? "canción" : "canciones"}${warning} · el proyecto anterior quedó intacto`);
 }
 
 function addSourceToTimeline(key) {
@@ -2129,12 +2285,13 @@ function positionClip(clip, segment) {
   const session = currentSession();
   normalizeFades(segment);
   clip.style.setProperty("--track-color", segment.color || colorForSegment(segment));
+  clip.style.setProperty("--section-strength", `${Math.round(16 + clamp(Number(segment.sectionIntensity) || 0.35, 0, 1) * 34)}%`);
   clip.style.left = `${(segment.start / session.duration) * 100}%`;
   clip.style.width = `${Math.max(0.15, ((segment.end - segment.start) / session.duration) * 100)}%`;
   const small = clip.querySelector("small");
   if (small) small.textContent = `${formatTime(segment.start, false)}–${formatTime(segment.end, false)} · ${segment.bpm || 120} BPM · ${segment.gainDb >= 0 ? "+" : ""}${segment.gainDb.toFixed(1)} dB`;
   const section = clip.querySelector(".clip-section");
-  if (section) section.textContent = segment.sectionLabel || "";
+  if (section) section.textContent = segment.sectionLabel ? `${segment.sectionLabel} · ${Math.round((segment.sectionIntensity || 0.5) * 100)}%` : "";
   const duration = Math.max(0.01, segment.end - segment.start);
   const fadeInPercent = (segment.fadeIn / duration) * 100;
   const fadeOutPercent = (segment.fadeOut / duration) * 100;
