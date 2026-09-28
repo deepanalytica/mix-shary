@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0d0e" />
+    <title>Mix Shary · Sala de edición</title>
+    <link rel="stylesheet" href="./styles.css?v=20260928-6" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div><strong>MIX SHARY</strong><span>Sala de edición</span></div>
+        </div>
+
+        <nav aria-label="Sesiones">
+          <p class="eyebrow">Sesiones</p>
+          <div id="session-list" class="session-list"></div>
+        </nav>
+
+        <section class="library-panel" aria-label="Biblioteca musical">
+          <div class="library-head">
+            <p class="eyebrow">Biblioteca</p>
+            <span id="library-count">0 canciones</span>
+          </div>
+          <button id="import-button" class="import-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            Subir canciones
+          </button>
+          <div id="library-list" class="library-list"></div>
+        </section>
+
+        <div class="sidebar-footer">
+          <span class="signal"><i></i> Archivos locales</span>
+          <small id="sync-label">Sincronizando…</small>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="project-name">Proyecto</p>
+            <h1 id="session-title">Música de los 80</h1>
+            <p id="session-subtitle" class="subtitle"></p>
+          </div>
+          <div class="top-actions">
+            <div class="panel-visibility" role="group" aria-label="Mostrar u ocultar paneles laterales">
+              <button id="toggle-sidebar" type="button" aria-pressed="true" title="Ocultar sesiones y biblioteca">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4V5Zm5 0v14"/></svg><span>Biblioteca</span>
+              </button>
+              <button id="toggle-inspector" type="button" aria-pressed="true" title="Ocultar inspector">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4V5Zm11 0v14"/></svg><span>Inspector</span>
+              </button>
+            </div>
+            <button id="edit-mode-button" class="edit-toggle active" type="button" aria-pressed="true" title="Bloquear o activar la edición directa">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18v2h2l11-11-4-4L2 16v2h2Zm10-12 4 4 2-2-4-4-2 2Z"/></svg>
+              Edición activa
+            </button>
+            <div class="mode-switch" role="group" aria-label="Versión de audio">
+              <button class="mode active" data-mode="master">Master</button>
+              <button class="mode" data-mode="rehearsal">Ensayo</button>
+            </div>
+            <button id="export-wav-button" class="download" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg>
+              Exportar WAV 24-bit
+            </button>
+            <a id="download-link" class="master-download" download>MP3 actual</a>
+          </div>
+        </header>
+
+        <section class="transport" aria-label="Controles de reproducción">
+          <button id="previous-button" class="icon-button" aria-label="Volver cinco segundos">
+            <svg viewBox="0 0 24 24"><path d="M11 7 6 12l5 5V7Zm7 0-5 5 5 5V7Z"/></svg>
+          </button>
+          <button id="play-button" class="play-button" aria-label="Reproducir">
+            <svg class="play-icon" viewBox="0 0 24 24"><path d="m9 6 9 6-9 6V6Z"/></svg>
+            <svg class="pause-icon" viewBox="0 0 24 24"><path d="M8 6h3v12H8V6Zm5 0h3v12h-3V6Z"/></svg>
+          </button>
+          <button id="next-button" class="icon-button" aria-label="Avanzar cinco segundos">
+            <svg viewBox="0 0 24 24"><path d="m13 7 5 5-5 5V7ZM6 7l5 5-5 5V7Z"/></svg>
+          </button>
+          <button id="stop-button" class="icon-button stop-button" aria-label="Detener y volver al inicio">
+            <svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z"/></svg>
+          </button>
+          <div class="timecode"><span id="current-time">0:00.0</span><i>/</i><span id="total-time">3:00.0</span></div>
+          <div class="spectrum-monitor" aria-label="Analizador de espectro FFT del master">
+            <div><strong>FFT LIVE</strong><span id="spectrum-label">MASTER</span></div>
+            <canvas id="spectrum-canvas"></canvas>
+          </div>
+          <label class="volume-control">
+            <svg viewBox="0 0 24 24"><path d="M5 10v4h3l4 3V7l-4 3H5Zm10-1.5a5 5 0 0 1 0 7"/></svg>
+            <input id="volume-slider" type="range" min="0" max="1" step="0.01" value="0.9" />
+          </label>
+          <span id="version-badge" class="version-badge">V4 limpia</span>
+        </section>
+
+        <section class="editor" aria-label="Línea de tiempo">
+          <div class="editor-heading">
+            <div><span class="eyebrow">Línea de tiempo</span><strong id="edit-summary">7 bloques · master limpio</strong></div>
+            <span class="hint">Haz clic en una pista para escucharla</span>
+          </div>
+
+          <div class="mix-toolbar" aria-label="Herramientas de mezcla">
+            <button id="snap-button" class="tool-button active" type="button" aria-pressed="true">Imán activo</button>
+            <label class="snap-grid">Ajuste
+              <select id="snap-grid-select" aria-label="Resolución del imán">
+                <option value="edges">Bordes</option>
+                <option value="beat">1 tiempo</option>
+                <option value="bar">4 tiempos</option>
+                <option value="phrase">8 tiempos</option>
+              </select>
+            </label>
+            <button id="split-button" class="tool-button" type="button" title="Atajo: S">Cortar en cursor</button>
+            <button id="align-button" class="tool-button" type="button">Encajar con anterior</button>
+            <button id="audition-button" class="tool-button" type="button">Oír transición</button>
+            <div class="zoom-toolbar" aria-label="Zoom de la línea de tiempo">
+              <label class="zoom-control" title="Zoom horizontal de tiempo">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M7 10h6"/></svg>
+                <span>Tiempo</span>
+                <input id="zoom-x" type="range" min="1" max="12" step="0.25" value="1" aria-label="Zoom horizontal" />
+                <output id="zoom-x-value" for="zoom-x">1×</output>
+              </label>
+              <label class="zoom-control" title="Zoom vertical de amplitud">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M10 7v6"/></svg>
+                <span>Onda</span>
+                <input id="zoom-y" type="range" min="0.75" max="4" step="0.25" value="1" aria-label="Zoom vertical de la onda" />
+                <output id="zoom-y-value" for="zoom-y">1×</output>
+              </label>
+              <button id="zoom-reset" class="zoom-reset" type="button">100%</button>
+            </div>
+            <span id="transition-readout" class="transition-readout">Selecciona una pista para revisar el empalme</span>
+          </div>
+
+          <section id="production-dock" class="production-dock collapsed" aria-label="Consola de producción">
+            <header class="production-dock-head">
+              <button id="production-dock-toggle" type="button" aria-expanded="false" aria-controls="production-dock-body" title="Atajo: Mayús + P">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
+                <span><strong>Consola de producción</strong><small>DJ Assist · FX Live · automatización</small></span>
+                <em id="production-dock-state">Abrir</em>
+              </button>
+            </header>
+            <div id="production-dock-body" class="production-dock-body">
+              <div class="production-dock-inner">
+          <div class="dj-assist" aria-label="Asistente DJ">
+            <div class="transition-health">
+              <span>DJ ASSIST</span>
+              <strong id="transition-health">Primera pista</strong>
+              <small id="transition-advice">Selecciona la canción que entra para analizar el empalme.</small>
+            </div>
+            <label class="phrase-size">Frase
+              <select id="phrase-size-select" aria-label="Duración de frase">
+                <option value="4">4 tiempos</option>
+                <option value="8" selected>8 tiempos</option>
+                <option value="16">16 tiempos</option>
+              </select>
+            </label>
+            <button id="phrase-align-button" class="assist-action" type="button">Alinear frase</button>
+            <button id="beat-lock-button" class="assist-action beat-lock-action" type="button">Cuadrar golpes</button>
+            <div class="nudge-actions" aria-label="Ajuste fino de la pista seleccionada">
+              <button type="button" data-nudge="-0.01" title="Mover 10 milisegundos antes">−10 ms</button>
+              <button type="button" data-nudge="0.01" title="Mover 10 milisegundos después">+10 ms</button>
+            </div>
+            <div class="performance-actions" aria-label="Eventos en el cursor">
+              <button type="button" data-add-event="cue" title="Atajo C">CUE</button>
+              <button type="button" data-add-event="echo" title="Echo out">ECHO</button>
+              <button type="button" data-add-event="filter" title="Barrido de filtro">FILTER</button>
+              <button type="button" data-add-event="dip" title="Golpe de silencio">DIP</button>
+            </div>
+          </div>
+
+          <section class="live-fx-console" aria-label="Consola de efectos en vivo">
+            <header class="live-fx-head">
+              <div class="live-fx-copy">
+                <span class="console-label">FX LIVE</span>
+                <strong>Consola de automatización</strong>
+                <small id="beat-phase-status">Marca o detecta el primer golpe de la pista para ajustar el empalme.</small>
+              </div>
+              <div class="live-fx-actions">
+                <button id="fx-record-button" class="fx-record" type="button" aria-pressed="false"><i></i> Grabar movimientos</button>
+                <button id="fx-snapshot-button" type="button">Escribir punto FX</button>
+                <button id="fx-reset-button" type="button">Reset</button>
+              </div>
+            </header>
+            <div class="live-fx-body">
+              <label class="live-knob" style="--knob-color:#ffb454">
+                <span>HPF</span>
+                <span class="knob-face"><i></i><input id="live-hpf" data-live-fx="highpass" type="range" min="20" max="12000" step="10" value="20" aria-label="Filtro pasa alto en vivo" /></span>
+                <output id="live-hpf-value">20 Hz</output>
+              </label>
+              <label class="live-knob" style="--knob-color:#9f8cff">
+                <span>LPF</span>
+                <span class="knob-face"><i></i><input id="live-lpf" data-live-fx="lowpass" type="range" min="200" max="20000" step="20" value="20000" aria-label="Filtro pasa bajo en vivo" /></span>
+                <output id="live-lpf-value">20 kHz</output>
+              </label>
+              <label class="live-knob" style="--knob-color:#55d6ff">
+                <span>ECHO</span>
+                <span class="knob-face"><i></i><input id="live-echo" data-live-fx="mix" type="range" min="0" max="1" step="0.01" value="0" aria-label="Mezcla de echo en vivo" /></span>
+                <output id="live-echo-value">0%</output>
+              </label>
+              <label class="live-knob" style="--knob-color:#46e0a1">
+                <span>FEEDBACK</span>
+                <span class="knob-face"><i></i><input id="live-feedback" data-live-fx="feedback" type="range" min="0" max="0.88" step="0.01" value="0.32" aria-label="Feedback de echo en vivo" /></span>
+                <output id="live-feedback-value">32%</output>
+              </label>
+              <label class="fx-division">División del delay
+                <select id="live-delay-division" aria-label="División musical del delay">
+                  <option value="0.25">1/16</option>
+                  <option value="0.5">1/8</option>
+                  <option value="0.75">1/8 puntillo</option>
+                  <option value="1" selected>1/4</option>
+                  <option value="2">1/2</option>
+                </select>
+              </label>
+              <div class="fx-punches" aria-label="Efectos rápidos">
+                <button type="button" data-fx-punch="echo">Echo out</button>
+                <button type="button" data-fx-punch="lowpass">Cierre LPF</button>
+                <button type="button" data-fx-punch="highpass">Subida HPF</button>
+                <button type="button" data-fx-punch="dip">Cut / DIP</button>
+              </div>
+            </div>
+          </section>
+              </div>
+            </div>
+          </section>
+
+          <nav class="track-navigator" aria-label="Navegación entre pistas">
+            <button id="track-previous-button" class="track-nav-step" type="button" aria-label="Pista anterior">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+            </button>
+            <label class="track-nav-select"><span>Pista seleccionada</span><select id="track-select" aria-label="Ir a una pista"></select></label>
+            <div id="track-nav-map" class="track-nav-map" aria-label="Mapa de pistas"></div>
+            <span id="track-nav-position" class="track-nav-position">1 de 1</span>
+            <div class="monitor-actions" role="group" aria-label="Escucha de pistas">
+              <button id="mute-all-button" type="button">Mutear todas</button>
+              <button id="solo-selected-button" type="button">Solo seleccionada</button>
+              <button id="clear-monitoring-button" type="button">Reactivar</button>
+            </div>
+            <button id="loudness-match-button" class="level-match-button" type="button" title="Analiza cada fragmento y ajusta su ganancia sin clipping">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17V9m5 8V5m6 12v-7m5 7V3"/></svg>
+              <span>Igualar nivel</span>
+              <small id="loudness-status">Auto Gain</small>
+            </button>
+            <div class="timeline-zoom-controls" role="group" aria-label="Zoom horizontal de la línea de tiempo">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M7 10h6"/></svg>
+              <button id="timeline-zoom-out" type="button" aria-label="Reducir ancho de la línea de tiempo">−</button>
+              <span><small>Ancho</small><strong id="timeline-zoom-value">1×</strong></span>
+              <button id="timeline-zoom-in" type="button" aria-label="Ampliar ancho de la línea de tiempo">+</button>
+              <i></i>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M10 7v6"/></svg>
+              <button id="timeline-height-out" type="button" aria-label="Reducir altura de las pistas">−</button>
+              <span><small>Altura</small><strong id="timeline-height-value">48</strong></span>
+              <button id="timeline-height-in" type="button" aria-label="Aumentar altura de las pistas">+</button>
+              <button id="timeline-zoom-fit" type="button">Ajustar</button>
+            </div>
+            <button id="track-center-button" class="track-nav-center" type="button">Centrar</button>
+            <button id="track-next-button" class="track-nav-step" type="button" aria-label="Pista siguiente">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+          </nav>
+
+          <div class="timeline-grid">
+            <div class="timeline-label waveform-label"><span>MEZCLA</span><small>Estéreo</small></div>
+            <div id="waveform-wrap" class="waveform-wrap">
+              <div id="waveform-content" class="timeline-content waveform-content">
+                <canvas id="waveform" aria-label="Forma de onda del master"></canvas>
+                <div id="beat-grid" class="beat-grid" aria-hidden="true"></div>
+                <div id="automation-events" class="automation-events" aria-label="Eventos y puntos CUE"></div>
+                <div id="ruler" class="ruler"></div>
+              </div>
+            </div>
+            <div id="track-control-rail" class="track-control-rail" aria-label="Controles de cada pista"></div>
+            <div id="lane-stack" class="lane-stack">
+              <div id="lane-content" class="timeline-content lane-content">
+                <div id="playhead" class="playhead"><i></i></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="source-drawer" class="source-drawer" aria-label="Canción completa" aria-hidden="true">
+          <header class="source-drawer-head">
+            <div><span class="eyebrow">Canción completa</span><strong id="source-title">Fuente</strong></div>
+            <div class="source-actions">
+              <button id="preview-source-button" class="source-action" type="button">
+                <svg class="preview-play" viewBox="0 0 24 24"><path d="m9 6 9 6-9 6V6Z"/></svg>
+                Previsualizar selección
+              </button>
+              <button id="detect-beat-button" class="source-action" type="button">Detectar golpe</button>
+              <button id="snap-source-beat-button" class="source-action" type="button">Ajustar corte al beat</button>
+              <button id="fit-source-button" class="source-action" type="button">Encajar duración</button>
+              <button id="use-full-source-button" class="source-action" type="button">Usar original completo</button>
+              <button id="close-source-button" class="drawer-close" type="button" aria-label="Cerrar canción completa">×</button>
+            </div>
+          </header>
+          <div class="source-editor">
+            <canvas id="source-waveform" aria-label="Forma de onda de la canción completa"></canvas>
+            <div id="source-selection" class="source-selection">
+              <button class="source-handle source-handle-left" data-source-handle="left" aria-label="Recortar inicio"></button>
+              <span class="selection-label" id="selection-label">0:00–0:30</span>
+              <button class="source-handle source-handle-right" data-source-handle="right" aria-label="Recortar final"></button>
+            </div>
+          </div>
+          <footer class="source-values">
+            <label>Entrada original <input id="source-in-input" type="number" min="0" step="0.01" /></label>
+            <label>Salida original <input id="source-out-input" type="number" min="0" step="0.01" /></label>
+            <span id="source-duration-label">Duración seleccionada 0:30.0</span>
+            <span class="draft-status"><i></i> Borrador guardado localmente</span>
+          </footer>
+        </section>
+      </main>
+
+      <aside class="inspector">
+        <div class="inspector-head">
+          <span class="eyebrow">Inspector</span>
+          <span id="ready-state" class="ready-state">Lista</span>
+        </div>
+        <div id="clip-inspector" class="clip-inspector"></div>
+        <section class="event-inspector" aria-label="Evento seleccionado">
+          <div class="event-inspector-head"><span>Eventos del mix</span><small id="event-count">0</small></div>
+          <div id="event-editor" class="event-editor"><p>Agrega CUE, ECHO, FILTER o DIP en la posición del cursor.</p></div>
+        </section>
+        <div class="draft-actions">
+          <button id="save-exact-button" class="save-exact-action" type="button">Guardar estado exacto</button>
+          <button id="restore-exact-button" type="button" disabled>Volver al punto guardado</button>
+          <small id="exact-save-status" class="exact-save-status">Autosave activo · todavía no hay punto manual</small>
+          <button id="open-source-button" type="button">Ver original completo</button>
+          <button id="replace-source-button" type="button">Reemplazar por mi archivo original</button>
+          <button id="duplicate-clip-button" type="button">Duplicar pista seleccionada</button>
+          <button id="remove-clip-button" class="danger-action" type="button">Quitar fragmento seleccionado</button>
+          <button id="export-edl-button" type="button">Exportar lista de cortes</button>
+          <button id="reset-draft-button" type="button">Restaurar esta sesión</button>
+        </div>
+        <div class="change-log">
+          <p class="eyebrow">Últimos cambios</p>
+          <ol id="change-list"></ol>
+        </div>
+        <div class="quality-strip">
+          <span>48 kHz</span><span>Estéreo</span><span>320 kbps</span>
+        </div>
+      </aside>
+    </div>
+
+    <audio id="audio" preload="metadata"></audio>
+    <audio id="source-preview" preload="metadata"></audio>
+    <input id="audio-upload" class="visually-hidden" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg" multiple />
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <div id="render-progress" class="render-progress" role="status" aria-live="polite">
+      <div><strong>Creando master de alta calidad</strong><span id="render-status">Preparando fuentes a 48 kHz / 24-bit…</span></div>
+    </div>
+    <script src="./data.js?v=20260927-3"></script>
+    <script src="./app.js?v=20260928-7"></script>
+  </body>
+</html>

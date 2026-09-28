@@ -1,0 +1,15 @@
+# Biblioteca musical privada y renders locales
+fuentes/
+entrega/
+*.mp3
+*.wav
+*.flac
+*.aac
+*.m4a
+*.ogg
+
+# Archivos generados
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
