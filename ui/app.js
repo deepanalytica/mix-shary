@@ -101,6 +101,8 @@ const livePreview = {
 
 let spectrumAnimation = 0;
 const spectrumHistory = [];
+const historyBySession = new Map();
+let historyApplying = false;
 
 const state = {
   sessionId: data.sessions.find((item) => item.status === "Lista")?.id,
@@ -999,6 +1001,70 @@ function serializeSession(session) {
   };
 }
 
+function ensureHistory(session = currentSession()) {
+  if (!session) return null;
+  if (!historyBySession.has(session.id)) {
+    historyBySession.set(session.id, { current: JSON.stringify(serializeSession(session)), undo: [], redo: [] });
+  }
+  return historyBySession.get(session.id);
+}
+
+function updateHistoryUI() {
+  const entry = ensureHistory();
+  const undoButton = document.querySelector("#undo-button");
+  const redoButton = document.querySelector("#redo-button");
+  if (undoButton) undoButton.disabled = !entry?.undo.length;
+  if (redoButton) redoButton.disabled = !entry?.redo.length;
+}
+
+function recordHistorySnapshot() {
+  if (historyApplying) return;
+  const entry = ensureHistory();
+  if (!entry) return;
+  const next = JSON.stringify(serializeSession(currentSession()));
+  if (next === entry.current) return;
+  entry.undo.push(entry.current);
+  if (entry.undo.length > 80) entry.undo.shift();
+  entry.current = next;
+  entry.redo = [];
+  updateHistoryUI();
+}
+
+function applyHistorySnapshot(snapshot, message) {
+  const session = currentSession();
+  if (!session || !snapshot) return;
+  const saved = JSON.parse(snapshot);
+  session.segments = structuredClone(saved.segments || []);
+  session.events = structuredClone(saved.events || []);
+  session.duration = Number.isFinite(saved.duration) ? saved.duration : session.duration;
+  applySessionDefaults(session);
+  state.selectedIndex = clamp(state.selectedIndex, 0, Math.max(0, session.segments.length - 1));
+  state.selectedEventId = session.events.some((event) => event.id === state.selectedEventId) ? state.selectedEventId : null;
+  historyApplying = true;
+  try { saveDraft(); } finally { historyApplying = false; }
+  renderSessions();
+  renderWorkspace();
+  restoreWorkspaceViewport();
+  updateHistoryUI();
+  showToast(message);
+}
+
+function undoEdit() {
+  const entry = ensureHistory();
+  if (!entry?.undo.length) return;
+  entry.redo.push(entry.current);
+  entry.current = entry.undo.pop();
+  applyHistorySnapshot(entry.current, "Cambio deshecho");
+}
+
+function redoEdit() {
+  const entry = ensureHistory();
+  if (!entry?.redo.length) return;
+  entry.undo.push(entry.current);
+  entry.current = entry.redo.pop();
+  applyHistorySnapshot(entry.current, "Cambio rehecho");
+}
+
 function workspaceViewPayload() {
   return {
     schema: 1,
@@ -1078,6 +1144,7 @@ function loadWorkspaceView(preferredSessionId = null) {
 }
 
 function saveDraft() {
+  recordHistorySnapshot();
   const drafts = {};
   data.sessions.filter((session) => session.master || session.custom).forEach((session) => {
     drafts[session.id] = serializeSession(session);
@@ -1489,6 +1556,7 @@ function restoreWorkspaceViewport() {
     waveformWrap.scrollLeft = left;
     if (state.sourceOpen) openSourceEditor();
   });
+  updateHistoryUI();
   updateExactSaveUI();
 }
 
@@ -2818,6 +2886,28 @@ function auditionTransition() {
   if (audio.paused) playButton.click();
 }
 
+async function prepareSmartTransition() {
+  const segment = selectedSegment();
+  const previous = previousSegment();
+  if (!segment || !previous) {
+    showToast("Selecciona la pista que entra después de otra");
+    return;
+  }
+  const button = document.querySelector("#smart-transition-button");
+  button.disabled = true;
+  button.textContent = "Analizando…";
+  try {
+    if (!Number.isFinite(segment.beatOffset)) await detectBeatAnchor();
+    if (!Number.isFinite(segment.beatOffset)) return;
+    alignSelectedPhrase();
+    window.setTimeout(auditionTransition, 120);
+    showToast("Empalme preparado: golpe detectado, frase alineada y preescucha activa");
+  } finally {
+    button.disabled = false;
+    button.textContent = "Empalme inteligente";
+  }
+}
+
 function useFullSource() {
   const segment = selectedSegment();
   const source = sourceFor(segment);
@@ -3595,7 +3685,10 @@ document.querySelector("#snap-grid-select").addEventListener("change", (event) =
 });
 document.querySelector("#split-button").addEventListener("click", splitClipAtCursor);
 document.querySelector("#align-button").addEventListener("click", () => applyTransition("short"));
+document.querySelector("#smart-transition-button").addEventListener("click", prepareSmartTransition);
 document.querySelector("#audition-button").addEventListener("click", auditionTransition);
+document.querySelector("#undo-button").addEventListener("click", undoEdit);
+document.querySelector("#redo-button").addEventListener("click", redoEdit);
 document.querySelector("#phrase-align-button").addEventListener("click", alignSelectedPhrase);
 document.querySelector("#beat-lock-button").addEventListener("click", alignSelectedPhrase);
 document.querySelector("#detect-beat-button").addEventListener("click", detectBeatAnchor);
@@ -3689,6 +3782,18 @@ window.addEventListener("resize", () => {
 window.addEventListener("beforeunload", saveWorkspaceView);
 window.addEventListener("keydown", (event) => {
   const isTyping = ["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName) || event.target.isContentEditable;
+  const commandKey = event.ctrlKey || event.metaKey;
+  if (commandKey && !isTyping && event.key.toLowerCase() === "z") {
+    event.preventDefault();
+    if (event.shiftKey) redoEdit();
+    else undoEdit();
+    return;
+  }
+  if (commandKey && !isTyping && event.key.toLowerCase() === "y") {
+    event.preventDefault();
+    redoEdit();
+    return;
+  }
   if (event.code === "Space" && !isTyping) {
     event.preventDefault();
     playButton.click();
@@ -3715,11 +3820,13 @@ async function bootstrap() {
   loadDrafts();
   loadWorkspaceView();
   data.sessions.forEach(applySessionDefaults);
+  data.sessions.forEach((session) => ensureHistory(session));
   await loadImportedLibrary();
   document.querySelector("#sync-label").textContent = `Actualizado ${new Date(data.generatedAt).toLocaleString("es-CL", { dateStyle: "short", timeStyle: "short" })}`;
   renderLibrary();
   renderSessions();
   renderWorkspace();
+  updateHistoryUI();
   restoreWorkspaceViewport();
   drawSpectrum();
 }

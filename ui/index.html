@@ -112,6 +112,10 @@
           </div>
 
           <div class="mix-toolbar" aria-label="Herramientas de mezcla">
+            <div class="history-tools" role="group" aria-label="Historial de edición">
+              <button id="undo-button" type="button" disabled title="Deshacer · Ctrl+Z"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 8-5 4 5 4M5 12h8a6 6 0 0 1 6 6"/></svg><span>Deshacer</span></button>
+              <button id="redo-button" type="button" disabled title="Rehacer · Ctrl+Mayús+Z"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 8 5 4-5 4m4-4h-8a6 6 0 0 0-6 6"/></svg><span>Rehacer</span></button>
+            </div>
             <button id="snap-button" class="tool-button active" type="button" aria-pressed="true">Imán activo</button>
             <label class="snap-grid">Ajuste
               <select id="snap-grid-select" aria-label="Resolución del imán">
@@ -123,6 +127,7 @@
             </label>
             <button id="split-button" class="tool-button" type="button" title="Atajo: S">Cortar en cursor</button>
             <button id="align-button" class="tool-button" type="button">Encajar con anterior</button>
+            <button id="smart-transition-button" class="tool-button smart-transition" type="button" title="Detecta el golpe, alinea la frase y reproduce el empalme">Empalme inteligente</button>
             <button id="audition-button" class="tool-button" type="button">Oír transición</button>
             <div class="zoom-toolbar" aria-label="Zoom de la línea de tiempo">
               <label class="zoom-control" title="Zoom horizontal de tiempo">
@@ -360,6 +365,6 @@
       <div><strong id="render-title">Creando master de alta calidad</strong><span id="render-status">Preparando fuentes a 48 kHz / 24-bit…</span></div>
     </div>
     <script src="./data.js?v=20260927-3"></script>
-    <script src="./app.js?v=20260928-10"></script>
+    <script src="./app.js?v=20260928-11"></script>
   </body>
 </html>

@@ -162,6 +162,13 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .tool-button { height: 27px; border: 1px solid var(--line); border-radius: 5px; padding: 0 8px; color: var(--muted); background: transparent; font-size: 8px; cursor: pointer; }
 .tool-button:hover { color: var(--text); }
 .tool-button.active { color: var(--accent); border-color: rgba(213,255,63,.34); background: rgba(213,255,63,.05); }
+.tool-button.smart-transition { color: var(--accent); border-color: rgba(213,255,63,.28); background: rgba(213,255,63,.045); }
+.tool-button.smart-transition:hover { border-color: rgba(213,255,63,.52); background: rgba(213,255,63,.09); }
+.history-tools { display: flex; align-items: center; gap: 3px; padding-right: 7px; border-right: 1px solid var(--line); }
+.history-tools button { height: 27px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 5px; padding: 0 7px; color: var(--muted); background: transparent; font-size: 8px; cursor: pointer; }
+.history-tools button:hover:not(:disabled) { color: var(--text); background: rgba(255,255,255,.045); }
+.history-tools button:disabled { color: var(--muted-2); opacity: .42; cursor: default; }
+.history-tools svg { width: 13px; height: 13px; }
 .transition-readout { margin-left: auto; color: var(--muted-2); font: 8px ui-monospace, monospace; }
 .zoom-toolbar { display: flex; align-items: center; gap: 7px; margin-left: 4px; padding-left: 10px; border-left: 1px solid var(--line); }
 .zoom-control { display: grid; grid-template-columns: 13px auto 58px 24px; align-items: center; gap: 5px; color: var(--muted-2); font-size: 8px; }
