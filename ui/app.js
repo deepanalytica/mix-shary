@@ -30,6 +30,7 @@ const sourceOutInput = document.querySelector("#source-out-input");
 const previewSourceButton = document.querySelector("#preview-source-button");
 const libraryList = document.querySelector("#library-list");
 const audioUpload = document.querySelector("#audio-upload");
+const sessionPackageInput = document.querySelector("#session-package-input");
 const toast = document.querySelector("#toast");
 const beatGrid = document.querySelector("#beat-grid");
 const automationEvents = document.querySelector("#automation-events");
@@ -39,8 +40,11 @@ const zoomYInput = document.querySelector("#zoom-y");
 const DRAFT_KEY = "mix-shary-edits-v3";
 const LEGACY_DRAFT_KEY = "mix-shary-edits-v2";
 const WORKSPACE_STATE_KEY = "mix-shary-workspace-state-v1";
+const WORKSPACE_VIEWS_KEY = "mix-shary-workspace-views-v1";
 const EXACT_STATE_KEY = "mix-shary-exact-session-v1";
+const CUSTOM_SESSIONS_KEY = "mix-shary-custom-sessions-v1";
 const LIBRARY_DB = "mix-shary-audio-library";
+const PACKAGE_MAGIC = "MIXSHARY1";
 const TRACK_COLORS = ["#d5ff3f", "#55d6ff", "#ff7ac8", "#ffb454", "#9f8cff", "#46e0a1", "#ff7474", "#6fa8ff", "#ffe66d", "#4dd4ac", "#ff9f68", "#d68cff"];
 const EVENT_TYPES = {
   cue: { label: "Hot cue", short: "CUE", color: "#d5ff3f", duration: 0 },
@@ -902,9 +906,53 @@ function formatTime(value, tenths = true) {
   return `${minutes}:${seconds.toFixed(tenths ? 1 : 0).padStart(tenths ? 4 : 2, "0")}`;
 }
 
+function escapeMarkup(value) {
+  return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
+}
+
 function refreshSourceText(segment) {
   if (Number.isFinite(segment.sourceIn) && Number.isFinite(segment.sourceOut)) {
     segment.source = `${formatTime(segment.sourceIn)}–${formatTime(segment.sourceOut)}`;
+  }
+}
+
+function portableSession(session) {
+  return {
+    ...serializeSession(session),
+    id: session.id,
+    title: session.title,
+    subtitle: session.subtitle || "Proyecto personal",
+    status: session.status || "Borrador",
+    version: session.version || "Sesión local",
+    master: session.master || "local:",
+    rehearsal: session.rehearsal || "local:",
+    waveform: Array.isArray(session.waveform) ? session.waveform : [],
+    changes: Array.isArray(session.changes) ? session.changes : [],
+    custom: true,
+  };
+}
+
+function loadCustomSessions() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CUSTOM_SESSIONS_KEY) || "[]");
+    if (!Array.isArray(saved)) return;
+    saved.forEach((session) => {
+      if (!session?.id || !Array.isArray(session.segments) || data.sessions.some((candidate) => candidate.id === session.id)) return;
+      session.custom = true;
+      session.master ||= "local:";
+      session.rehearsal ||= "local:";
+      data.sessions.push(session);
+    });
+  } catch (error) {
+    console.warn("No fue posible recuperar los proyectos personales", error);
+  }
+}
+
+function persistCustomSessions() {
+  try {
+    localStorage.setItem(CUSTOM_SESSIONS_KEY, JSON.stringify(data.sessions.filter((session) => session.custom).map(portableSession)));
+  } catch (error) {
+    console.warn("No fue posible guardar el catálogo de proyectos", error);
   }
 }
 
@@ -976,9 +1024,17 @@ function workspaceViewPayload() {
   };
 }
 
+function storeWorkspaceViewPayload(payload) {
+  localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify(payload));
+  const views = JSON.parse(localStorage.getItem(WORKSPACE_VIEWS_KEY) || "{}");
+  views[payload.sessionId] = payload;
+  localStorage.setItem(WORKSPACE_VIEWS_KEY, JSON.stringify(views));
+}
+
 function saveWorkspaceView() {
   try {
-    localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify(workspaceViewPayload()));
+    const payload = workspaceViewPayload();
+    storeWorkspaceViewPayload(payload);
   } catch (error) {
     console.warn("No fue posible guardar la vista de trabajo", error);
   }
@@ -989,11 +1045,14 @@ function scheduleWorkspaceSave() {
   scheduleWorkspaceSave.timer = setTimeout(saveWorkspaceView, 120);
 }
 
-function loadWorkspaceView() {
+function loadWorkspaceView(preferredSessionId = null) {
   try {
-    const saved = JSON.parse(localStorage.getItem(WORKSPACE_STATE_KEY) || "null");
+    const last = JSON.parse(localStorage.getItem(WORKSPACE_STATE_KEY) || "null");
+    const views = JSON.parse(localStorage.getItem(WORKSPACE_VIEWS_KEY) || "{}");
+    const desiredId = preferredSessionId || last?.sessionId || state.sessionId;
+    const saved = views[desiredId] || (last?.sessionId === desiredId ? last : null);
     if (!saved || saved.schema !== 1) return;
-    if (data.sessions.some((session) => session.id === saved.sessionId && session.master)) state.sessionId = saved.sessionId;
+    if (data.sessions.some((session) => session.id === desiredId && (session.master || session.custom))) state.sessionId = desiredId;
     state.selectedIndex = Math.max(0, Number(saved.selectedIndex) || 0);
     state.selectedEventId = saved.selectedEventId || null;
     state.mode = saved.mode === "rehearsal" ? "rehearsal" : "master";
@@ -1020,10 +1079,11 @@ function loadWorkspaceView() {
 
 function saveDraft() {
   const drafts = {};
-  data.sessions.filter((session) => session.master).forEach((session) => {
+  data.sessions.filter((session) => session.master || session.custom).forEach((session) => {
     drafts[session.id] = serializeSession(session);
   });
   localStorage.setItem(DRAFT_KEY, JSON.stringify(drafts));
+  persistCustomSessions();
   saveWorkspaceView();
   document.querySelectorAll(".draft-status").forEach((label) => label.classList.add("saved"));
 }
@@ -1033,10 +1093,11 @@ function updateExactSaveUI() {
   const status = document.querySelector("#exact-save-status");
   if (!restoreButton || !status) return;
   try {
-    const saved = JSON.parse(localStorage.getItem(EXACT_STATE_KEY) || "null");
-    restoreButton.disabled = !saved;
+    const snapshots = readExactSnapshots();
+    const saved = snapshots[state.sessionId];
+    restoreButton.disabled = !saved?.session;
     status.textContent = saved?.savedAt
-      ? `Punto manual: ${new Date(saved.savedAt).toLocaleString("es-CL", { dateStyle: "short", timeStyle: "short" })} · autosave activo`
+      ? `Punto de este proyecto: ${new Date(saved.savedAt).toLocaleString("es-CL", { dateStyle: "short", timeStyle: "short" })} · autosave activo`
       : "Autosave activo · todavía no hay punto manual";
   } catch (error) {
     restoreButton.disabled = true;
@@ -1044,35 +1105,54 @@ function updateExactSaveUI() {
   }
 }
 
+function readExactSnapshots() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(EXACT_STATE_KEY) || "null");
+    if (saved?.schema === 2 && saved.snapshots) {
+      return Object.fromEntries(Object.entries(saved.snapshots).filter(([, snapshot]) => snapshot?.projectScoped === true));
+    }
+    if (saved?.sessions) {
+      const id = saved.view?.sessionId;
+      if (id && saved.sessions[id]) return { [id]: { projectScoped: true, savedAt: saved.savedAt, session: saved.sessions[id], view: saved.view } };
+    }
+  } catch (error) {
+    console.warn("No fue posible leer los puntos exactos", error);
+  }
+  return {};
+}
+
+function writeExactSnapshots(snapshots) {
+  localStorage.setItem(EXACT_STATE_KEY, JSON.stringify({ schema: 2, snapshots }));
+}
+
 function saveExactSession() {
   saveDraft();
-  const snapshot = {
-    schema: 1,
+  const session = currentSession();
+  const snapshots = readExactSnapshots();
+  snapshots[session.id] = {
+    projectScoped: true,
     savedAt: new Date().toISOString(),
-    sessions: Object.fromEntries(data.sessions.filter((session) => session.master).map((session) => [session.id, serializeSession(session)])),
+    session: serializeSession(session),
     view: workspaceViewPayload(),
   };
-  localStorage.setItem(EXACT_STATE_KEY, JSON.stringify(snapshot));
+  writeExactSnapshots(snapshots);
   updateExactSaveUI();
-  showToast("Estado exacto guardado: cortes, efectos, cursor, zoom y pista seleccionada");
+  showToast(`Punto exacto guardado para ${session.title}`);
 }
 
 function restoreExactSession() {
   try {
-    const snapshot = JSON.parse(localStorage.getItem(EXACT_STATE_KEY) || "null");
-    if (!snapshot?.sessions) return;
-    Object.entries(snapshot.sessions).forEach(([id, saved]) => {
-      const session = data.sessions.find((candidate) => candidate.id === id);
-      if (!session || !saved?.segments) return;
-      session.segments = structuredClone(saved.segments);
-      session.events = structuredClone(saved.events || []);
-      session.duration = saved.duration;
-      applySessionDefaults(session);
-    });
-    const desiredView = snapshot.view || {};
+    const snapshot = readExactSnapshots()[state.sessionId];
+    const session = currentSession();
+    if (!snapshot?.session?.segments || !session) return;
+    session.segments = structuredClone(snapshot.session.segments);
+    session.events = structuredClone(snapshot.session.events || []);
+    session.duration = snapshot.session.duration;
+    applySessionDefaults(session);
+    const desiredView = { ...workspaceViewPayload(), ...(snapshot.view || {}), sessionId: session.id, schema: 1 };
     saveDraft();
-    localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify(desiredView));
-    loadWorkspaceView();
+    storeWorkspaceViewPayload(desiredView);
+    loadWorkspaceView(session.id);
     state.selectedIndex = clamp(state.selectedIndex, 0, Math.max(0, currentSession().segments.length - 1));
     renderSessions();
     renderWorkspace();
@@ -1084,6 +1164,232 @@ function restoreExactSession() {
   }
 }
 
+function uniqueSessionId(title) {
+  const stem = String(title || "proyecto").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "proyecto";
+  let candidate = stem;
+  let suffix = 2;
+  while (data.sessions.some((session) => session.id === candidate)) candidate = `${stem}-${suffix++}`;
+  return candidate;
+}
+
+function toggleNewSessionForm(force) {
+  const form = document.querySelector("#new-session-form");
+  const button = document.querySelector("#new-session-button");
+  const open = typeof force === "boolean" ? force : form.hidden;
+  form.hidden = !open;
+  button.setAttribute("aria-expanded", String(open));
+  if (open) window.setTimeout(() => document.querySelector("#new-session-name").focus(), 0);
+}
+
+function createNewSession(event) {
+  event.preventDefault();
+  const nameInput = document.querySelector("#new-session-name");
+  const title = nameInput.value.trim();
+  if (!title) {
+    nameInput.focus();
+    showToast("Escribe un nombre para el proyecto");
+    return;
+  }
+  const duration = clamp(Number(document.querySelector("#new-session-duration").value) || 180, 30, 1800);
+  saveDraft();
+  audio.pause();
+  stopLivePreview(true);
+  closeSourceEditor();
+  audio.currentTime = 0;
+  const session = {
+    id: uniqueSessionId(title),
+    title,
+    subtitle: "Proyecto personal",
+    duration,
+    status: "Borrador",
+    version: "Sesión local",
+    master: "local:",
+    rehearsal: "local:",
+    waveform: Array.from({ length: 240 }, () => 0.025),
+    segments: [],
+    events: [],
+    changes: ["Proyecto creado · agrega canciones desde tu biblioteca"],
+    custom: true,
+  };
+  applySessionDefaults(session);
+  data.sessions.push(session);
+  state.sessionId = session.id;
+  state.selectedIndex = 0;
+  state.selectedEventId = null;
+  state.resumeTime = 0;
+  state.resumeScrollLeft = 0;
+  saveDraft();
+  toggleNewSessionForm(false);
+  nameInput.value = "";
+  renderSessions();
+  updateExactSaveUI();
+  renderWorkspace();
+  restoreWorkspaceViewport();
+  showToast(`${title} creado · el proyecto anterior sigue guardado`);
+}
+
+function packageFilename(title) {
+  return `${String(title || "sesion").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "sesion"}.mixshary`;
+}
+
+async function fetchSessionSourceBlob(source) {
+  if (!source?.file) throw new Error("Fuente sin archivo");
+  const response = await fetch(source.file);
+  if (!response.ok) throw new Error(`No se pudo leer ${source.name}`);
+  return response.blob();
+}
+
+async function exportPortableSession() {
+  const session = currentSession();
+  const overlay = document.querySelector("#render-progress");
+  const title = document.querySelector("#render-title");
+  const status = document.querySelector("#render-status");
+  const sourceKeys = [...new Set(session.segments.map((segment) => segment.sourceKey).filter(Boolean))];
+  overlay.classList.add("show");
+  title.textContent = "Empaquetando sesión completa";
+  status.textContent = "Reuniendo proyecto, marcadores y audios…";
+  try {
+    const audioParts = [];
+    const sources = [];
+    let offset = 0;
+    for (let index = 0; index < sourceKeys.length; index += 1) {
+      const key = sourceKeys[index];
+      const source = data.library[key];
+      status.textContent = `Incluyendo audio ${index + 1} de ${sourceKeys.length}: ${source?.name || key}`;
+      const blob = await fetchSessionSourceBlob(source);
+      const extension = blob.type.includes("wav") ? "wav" : blob.type.includes("ogg") ? "ogg" : blob.type.includes("mp4") || blob.type.includes("m4a") ? "m4a" : "mp3";
+      sources.push({
+        key,
+        offset,
+        length: blob.size,
+        type: blob.type || "audio/mpeg",
+        filename: `${source?.artist || "Audio"} - ${source?.name || key}.${extension}`,
+        metadata: { name: source?.name || key, artist: source?.artist || "Archivo personal", duration: source?.duration, waveform: source?.waveform || [], bpm: source?.bpm || 120 },
+      });
+      audioParts.push(blob);
+      offset += blob.size;
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    const manifest = {
+      schema: 1,
+      app: "Mix Shary",
+      exportedAt: new Date().toISOString(),
+      session: portableSession(session),
+      view: workspaceViewPayload(),
+      exact: readExactSnapshots()[session.id] || null,
+      sources,
+    };
+    const encoder = new TextEncoder();
+    const manifestBytes = encoder.encode(JSON.stringify(manifest));
+    const header = encoder.encode(`${PACKAGE_MAGIC}\n${String(manifestBytes.byteLength).padStart(12, "0")}\n`);
+    const file = new Blob([header, manifestBytes, ...audioParts], { type: "application/octet-stream" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(file);
+    link.download = packageFilename(session.title);
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(link.href), 3000);
+    showToast(`Sesión empaquetada · ${sources.length} audios incluidos`);
+  } catch (error) {
+    console.error("No fue posible empaquetar la sesión", error);
+    showToast(`No se pudo empaquetar: ${error.message}. Reemplaza las fuentes faltantes y reintenta`);
+  } finally {
+    overlay.classList.remove("show");
+    title.textContent = "Creando master de alta calidad";
+  }
+}
+
+function remapSessionSources(session, sourceMap) {
+  session.segments?.forEach((segment) => {
+    if (sourceMap[segment.sourceKey]) segment.sourceKey = sourceMap[segment.sourceKey];
+  });
+  return session;
+}
+
+async function importPortableSession(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  const overlay = document.querySelector("#render-progress");
+  const title = document.querySelector("#render-title");
+  const status = document.querySelector("#render-status");
+  overlay.classList.add("show");
+  title.textContent = "Abriendo paquete de sesión";
+  status.textContent = "Leyendo estructura y marcadores…";
+  try {
+    const headerText = await file.slice(0, 23).text();
+    const [magic, lengthText] = headerText.split("\n");
+    const manifestLength = Number(lengthText);
+    if (magic !== PACKAGE_MAGIC || !Number.isInteger(manifestLength) || manifestLength <= 0) throw new Error("El archivo no es un paquete Mix Shary válido");
+    const manifestStart = 23;
+    const manifest = JSON.parse(await file.slice(manifestStart, manifestStart + manifestLength).text());
+    if (manifest.schema !== 1 || !manifest.session?.segments || !Array.isArray(manifest.sources)) throw new Error("La versión del paquete no es compatible");
+    const payloadStart = manifestStart + manifestLength;
+    const sourceMap = {};
+    for (let index = 0; index < manifest.sources.length; index += 1) {
+      const packed = manifest.sources[index];
+      status.textContent = `Restaurando audio ${index + 1} de ${manifest.sources.length}: ${packed.metadata?.name || packed.filename}`;
+      const blob = file.slice(payloadStart + packed.offset, payloadStart + packed.offset + packed.length, packed.type);
+      const record = { id: `package-${Date.now()}-${index}-${packed.filename}`, name: packed.filename, type: packed.type, blob, importedAt: new Date().toISOString() };
+      await storeImportedFile(record);
+      sourceMap[packed.key] = await registerImportedFile(record, false);
+    }
+    const session = remapSessionSources(structuredClone(manifest.session), sourceMap);
+    const originalId = session.id;
+    session.id = uniqueSessionId(session.title);
+    session.custom = true;
+    session.master = "local:";
+    session.rehearsal = "local:";
+    session.status = "Importado";
+    const trackIdMap = {};
+    session.segments.forEach((segment, index) => {
+      const previousId = segment.id;
+      segment.id = `${session.id}-track-${index}-${Date.now()}`;
+      if (previousId) trackIdMap[previousId] = segment.id;
+    });
+    session.events?.forEach((timelineEvent) => {
+      if (trackIdMap[timelineEvent.trackId]) timelineEvent.trackId = trackIdMap[timelineEvent.trackId];
+    });
+    applySessionDefaults(session);
+    data.sessions.push(session);
+    if (manifest.exact?.session) {
+      const snapshots = readExactSnapshots();
+      const exactSession = remapSessionSources(structuredClone(manifest.exact.session), sourceMap);
+      exactSession.id = session.id;
+      exactSession.custom = true;
+      exactSession.master = "local:";
+      exactSession.rehearsal = "local:";
+      exactSession.segments?.forEach((segment, index) => {
+        const previousId = segment.id;
+        segment.id = session.segments[index]?.id || segment.id;
+        if (previousId) trackIdMap[previousId] = segment.id;
+      });
+      exactSession.events?.forEach((timelineEvent) => {
+        if (trackIdMap[timelineEvent.trackId]) timelineEvent.trackId = trackIdMap[timelineEvent.trackId];
+      });
+      snapshots[session.id] = { ...manifest.exact, projectScoped: true, session: exactSession, view: { ...(manifest.exact.view || {}), sessionId: session.id } };
+      writeExactSnapshots(snapshots);
+    }
+    state.sessionId = session.id;
+    const importedView = { ...workspaceViewPayload(), ...(manifest.view || {}), sessionId: session.id, schema: 1 };
+    storeWorkspaceViewPayload(importedView);
+    loadWorkspaceView(session.id);
+    state.selectedIndex = clamp(state.selectedIndex, 0, Math.max(0, session.segments.length - 1));
+    saveDraft();
+    renderLibrary();
+    renderSessions();
+    updateExactSaveUI();
+    renderWorkspace();
+    restoreWorkspaceViewport();
+    showToast(`${session.title} restaurado con ${manifest.sources.length} audios · original ${originalId}`);
+  } catch (error) {
+    console.error("No fue posible abrir el paquete", error);
+    showToast(error.message || "No se pudo abrir el paquete de sesión");
+  } finally {
+    overlay.classList.remove("show");
+    title.textContent = "Creando master de alta calidad";
+  }
+}
+
 function renderSessions() {
   sessionList.innerHTML = "";
   data.sessions.forEach((session, index) => {
@@ -1092,7 +1398,7 @@ function renderSessions() {
     button.disabled = !session.master;
     button.innerHTML = `
       <span class="session-avatar" style="--session-color:${TRACK_COLORS[index % TRACK_COLORS.length]}"><i></i></span>
-      <span class="session-copy"><strong>${session.title}</strong><small><i class="session-status"></i>${session.status} · mezcla local</small></span>
+      <span class="session-copy"><strong>${escapeMarkup(session.title)}</strong><small><i class="session-status"></i>${escapeMarkup(session.status)} · mezcla local</small></span>
       <span class="session-duration">${session.duration ? formatTime(session.duration, false) : "—"}</span>`;
     button.addEventListener("click", () => selectSession(session.id));
     sessionList.appendChild(button);
@@ -1101,13 +1407,18 @@ function renderSessions() {
 
 function selectSession(id) {
   if (id === state.sessionId) return;
+  saveDraft();
   audio.pause();
   stopLivePreview(true);
   closeSourceEditor();
   state.sessionId = id;
   state.selectedIndex = 0;
   state.selectedEventId = null;
+  state.resumeTime = 0;
+  state.resumeScrollLeft = 0;
+  loadWorkspaceView(id);
   renderSessions();
+  updateExactSaveUI();
   renderWorkspace();
   saveWorkspaceView();
 }
@@ -1129,10 +1440,10 @@ function loadAudio(reset = true) {
   const source = state.mode === "master" ? session.master : session.rehearsal;
   if (reset) audio.currentTime = 0;
   stopLivePreview(true);
-  if (IS_PUBLIC_HOST) audio.removeAttribute("src");
+  if (IS_PUBLIC_HOST || session.custom) audio.removeAttribute("src");
   else audio.src = source;
   audio.volume = Number(document.querySelector("#volume-slider").value);
-  if (IS_PUBLIC_HOST) {
+  if (IS_PUBLIC_HOST || session.custom) {
     downloadLink.removeAttribute("href");
     downloadLink.removeAttribute("download");
     downloadLink.textContent = "Audio local";
@@ -3121,7 +3432,7 @@ playButton.addEventListener("click", async () => {
     audio.pause();
     return;
   }
-  if (IS_PUBLIC_HOST && !canLivePreview()) {
+  if ((IS_PUBLIC_HOST || currentSession().custom) && !canLivePreview()) {
     showToast("Carga tus canciones y reemplaza las fuentes de la sesión para escuchar el mix");
     return;
   }
@@ -3324,6 +3635,12 @@ document.querySelector("#clear-monitoring-button").addEventListener("click", () 
   showToast("Escucha normal restaurada");
 });
 document.querySelector("#production-dock-toggle").addEventListener("click", () => toggleProductionDock());
+document.querySelector("#new-session-button").addEventListener("click", () => toggleNewSessionForm());
+document.querySelector("#cancel-session-button").addEventListener("click", () => toggleNewSessionForm(false));
+document.querySelector("#new-session-form").addEventListener("submit", createNewSession);
+document.querySelector("#export-session-button").addEventListener("click", exportPortableSession);
+document.querySelector("#import-session-button").addEventListener("click", () => sessionPackageInput.click());
+sessionPackageInput.addEventListener("change", importPortableSession);
 audioUpload.addEventListener("change", handleAudioUpload);
 sourceSelection.addEventListener("pointerdown", startSourceDrag);
 sourceInInput.addEventListener("change", applySourceInputs);
@@ -3387,6 +3704,7 @@ window.addEventListener("keydown", (event) => {
 });
 
 async function bootstrap() {
+  loadCustomSessions();
   data.sessions.forEach(applySessionDefaults);
   loadDrafts();
   loadWorkspaceView();

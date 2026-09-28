@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0b0d0e" />
     <title>Mix Shary · Sala de edición</title>
-    <link rel="stylesheet" href="./styles.css?v=20260928-6" />
+    <link rel="stylesheet" href="./styles.css?v=20260928-8" />
   </head>
   <body>
     <div class="app-shell">
@@ -16,8 +16,17 @@
         </div>
 
         <nav aria-label="Sesiones">
-          <p class="eyebrow">Sesiones</p>
+          <div class="sessions-heading"><p class="eyebrow">Sesiones</p><button id="new-session-button" type="button" aria-expanded="false" aria-controls="new-session-form" title="Crear un proyecto nuevo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Nuevo</span></button></div>
+          <form id="new-session-form" class="new-session-form" hidden>
+            <label><span>Nombre del proyecto</span><input id="new-session-name" type="text" maxlength="70" placeholder="Ej. Michael Jackson" autocomplete="off" /></label>
+            <label><span>Duración inicial</span><select id="new-session-duration"><option value="60">1:00</option><option value="120">2:00</option><option value="180" selected>3:00</option><option value="240">4:00</option><option value="300">5:00</option></select></label>
+            <div><button id="create-session-button" class="primary" type="submit">Crear proyecto</button><button id="cancel-session-button" type="button">Cancelar</button></div>
+          </form>
           <div id="session-list" class="session-list"></div>
+          <div class="session-portability" role="group" aria-label="Mover una sesión entre computadores">
+            <button id="export-session-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg><span>Empaquetar sesión</span></button>
+            <button id="import-session-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17V5m0 0 5 5m-5-5-5 5M5 20h14"/></svg><span>Abrir paquete</span></button>
+          </div>
         </nav>
 
         <section class="library-panel" aria-label="Biblioteca musical">
@@ -345,11 +354,12 @@
     <audio id="audio" preload="metadata"></audio>
     <audio id="source-preview" preload="metadata"></audio>
     <input id="audio-upload" class="visually-hidden" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg" multiple />
+    <input id="session-package-input" class="visually-hidden" type="file" accept=".mixshary,application/octet-stream" />
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <div id="render-progress" class="render-progress" role="status" aria-live="polite">
-      <div><strong>Creando master de alta calidad</strong><span id="render-status">Preparando fuentes a 48 kHz / 24-bit…</span></div>
+      <div><strong id="render-title">Creando master de alta calidad</strong><span id="render-status">Preparando fuentes a 48 kHz / 24-bit…</span></div>
     </div>
     <script src="./data.js?v=20260927-3"></script>
-    <script src="./app.js?v=20260928-7"></script>
+    <script src="./app.js?v=20260928-9"></script>
   </body>
 </html>
