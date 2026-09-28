@@ -1,4 +1,26 @@
-const data = structuredClone(window.MIX_DATA);
+const IS_PUBLIC_HOST = window.location.hostname.endsWith("github.io");
+const PUBLIC_EMPTY_DATA = {
+  project: "Mix Shary",
+  generatedAt: new Date().toISOString(),
+  sessions: [{
+    id: "nuevo-mix",
+    title: "Nuevo mix",
+    subtitle: "Proyecto vacío · sube tus canciones para comenzar",
+    duration: 180,
+    status: "Borrador",
+    version: "Sesión vacía",
+    master: "local:",
+    rehearsal: "local:",
+    waveform: Array.from({ length: 240 }, () => 0.025),
+    segments: [],
+    events: [],
+    changes: ["Proyecto limpio y listo para importar canciones"],
+    custom: false,
+  }],
+  library: {},
+};
+const INITIAL_DATA = IS_PUBLIC_HOST ? PUBLIC_EMPTY_DATA : window.MIX_DATA;
+const data = structuredClone(INITIAL_DATA);
 if (data.library.voice) {
   data.library.voice.name = "La Voz de los '80 · original completa";
   data.library.voice.artist = "Los Prisioneros";
@@ -20,7 +42,6 @@ const playhead = document.querySelector("#playhead");
 const clipInspector = document.querySelector("#clip-inspector");
 const changeList = document.querySelector("#change-list");
 const downloadLink = document.querySelector("#download-link");
-const IS_PUBLIC_HOST = window.location.hostname.endsWith("github.io");
 const editModeButton = document.querySelector("#edit-mode-button");
 const sourceDrawer = document.querySelector("#source-drawer");
 const sourceCanvas = document.querySelector("#source-waveform");
@@ -40,13 +61,13 @@ const automationEvents = document.querySelector("#automation-events");
 const eventEditor = document.querySelector("#event-editor");
 const zoomXInput = document.querySelector("#zoom-x");
 const zoomYInput = document.querySelector("#zoom-y");
-const DRAFT_KEY = "mix-shary-edits-v3";
-const LEGACY_DRAFT_KEY = "mix-shary-edits-v2";
-const WORKSPACE_STATE_KEY = "mix-shary-workspace-state-v1";
-const WORKSPACE_VIEWS_KEY = "mix-shary-workspace-views-v1";
-const EXACT_STATE_KEY = "mix-shary-exact-session-v1";
-const CUSTOM_SESSIONS_KEY = "mix-shary-custom-sessions-v1";
-const LIBRARY_DB = "mix-shary-audio-library";
+const DRAFT_KEY = IS_PUBLIC_HOST ? "mix-shary-online-clean-edits-v1" : "mix-shary-edits-v3";
+const LEGACY_DRAFT_KEY = IS_PUBLIC_HOST ? "mix-shary-online-clean-edits-v0" : "mix-shary-edits-v2";
+const WORKSPACE_STATE_KEY = IS_PUBLIC_HOST ? "mix-shary-online-clean-workspace-state-v1" : "mix-shary-workspace-state-v1";
+const WORKSPACE_VIEWS_KEY = IS_PUBLIC_HOST ? "mix-shary-online-clean-workspace-views-v1" : "mix-shary-workspace-views-v1";
+const EXACT_STATE_KEY = IS_PUBLIC_HOST ? "mix-shary-online-clean-exact-session-v1" : "mix-shary-exact-session-v1";
+const CUSTOM_SESSIONS_KEY = IS_PUBLIC_HOST ? "mix-shary-online-clean-custom-sessions-v1" : "mix-shary-custom-sessions-v1";
+const LIBRARY_DB = IS_PUBLIC_HOST ? "mix-shary-online-clean-audio-library" : "mix-shary-audio-library";
 const PACKAGE_MAGIC = "MIXSHARY1";
 const TRACK_COLORS = ["#d5ff3f", "#55d6ff", "#ff7ac8", "#ffb454", "#9f8cff", "#46e0a1", "#ff7474", "#6fa8ff", "#ffe66d", "#4dd4ac", "#ff9f68", "#d68cff"];
 const SECTION_COLORS = {
@@ -119,7 +140,7 @@ let autoMixCooking = false;
 let historyApplying = false;
 
 const state = {
-  sessionId: data.sessions.find((item) => item.status === "Lista")?.id,
+  sessionId: data.sessions.find((item) => item.status === "Lista")?.id || data.sessions[0]?.id,
   mode: "master",
   selectedIndex: 0,
   editMode: true,
@@ -3958,7 +3979,7 @@ async function renderHighQualityMix() {
 }
 
 function resetDraft() {
-  const original = window.MIX_DATA.sessions.find((session) => session.id === state.sessionId);
+  const original = INITIAL_DATA.sessions.find((session) => session.id === state.sessionId);
   const session = currentSession();
   session.segments = structuredClone(original.segments);
   session.events = [];
