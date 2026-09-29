@@ -53,6 +53,12 @@ const libraryList = document.querySelector("#library-list");
 const selectAllSourcesButton = document.querySelector("#select-all-sources");
 const autoMixButton = document.querySelector("#auto-mix-button");
 const autoMixCount = document.querySelector("#auto-mix-count");
+const autoTransitionStyle = document.querySelector("#auto-transition-style");
+const autoPhraseSize = document.querySelector("#auto-phrase-size");
+const autoFxIntensity = document.querySelector("#auto-fx-intensity");
+const autoFxIntensityValue = document.querySelector("#auto-fx-intensity-value");
+const sourceSectionMap = document.querySelector("#source-section-map");
+const sourceArrangement = document.querySelector("#source-arrangement");
 const audioUpload = document.querySelector("#audio-upload");
 const sessionPackageInput = document.querySelector("#session-package-input");
 const toast = document.querySelector("#toast");
@@ -84,6 +90,7 @@ const EVENT_TYPES = {
   filter: { label: "Barrido de filtro", short: "FILTER", color: "#ffb454", duration: 2 },
   dip: { label: "Golpe de silencio", short: "DIP", color: "#ff7ac8", duration: 0.35 },
   fx: { label: "Automatización FX", short: "AUTO", color: "#46e0a1", duration: 0.18 },
+  blend: { label: "Bass swap", short: "BLEND", color: "#9f8cff", duration: 2 },
 };
 const FX_PRESETS = {
   balanced: {
@@ -119,6 +126,7 @@ function defaultEventParams(type) {
   if (type === "echo") return { delayBeats: 1, mix: 0.72, feedback: 0.42 };
   if (type === "filter") return { filterMode: "lowpass", startHz: 18000, endHz: 420, resonance: 1.2 };
   if (type === "fx") return { highpass: 20, lowpass: 20000, mix: 0, feedback: 0.32, delayBeats: 1 };
+  if (type === "blend") return { role: "out", startHighpass: 20, endHighpass: 180, startLowpass: 20000, endLowpass: 9000 };
   return {};
 }
 const livePreview = {
@@ -138,6 +146,7 @@ const selectedLibrarySources = new Set();
 const silentTransportUrls = new Map();
 let autoMixCooking = false;
 let historyApplying = false;
+const autoMixSettings = { transitionStyle: "smart", phraseBars: "auto", fxIntensity: 0.72 };
 
 const state = {
   sessionId: data.sessions.find((item) => item.status === "Lista")?.id || data.sessions[0]?.id,
@@ -552,6 +561,22 @@ function connectProcessingGraph(context, sourceNode, segment, envelope, output, 
   const lowpass = context.createBiquadFilter();
   lowpass.type = "lowpass";
   lowpass.frequency.value = effectIsActive(segment, "lowpass") ? clamp(Number(fx.lowpass) || 20000, 80, 20000) : 20000;
+  timelineEvents.filter((event) => event.type === "blend" && event.time + event.duration >= schedule.cursor).forEach((event) => {
+    const params = { ...defaultEventParams("blend"), ...(event.params || {}) };
+    const start = scheduledTime(Math.max(event.time, schedule.cursor));
+    const end = scheduledTime(event.time + Math.max(0.2, event.duration));
+    const incoming = params.role === "in";
+    const startHighpass = clamp(Number(params.startHighpass) || (incoming ? 220 : 20), 20, 18000);
+    const endHighpass = clamp(Number(params.endHighpass) || (incoming ? 20 : 220), 20, 18000);
+    const startLowpass = clamp(Number(params.startLowpass) || (incoming ? 9000 : 20000), 80, 20000);
+    const endLowpass = clamp(Number(params.endLowpass) || (incoming ? 20000 : 9000), 80, 20000);
+    highpass.Q.setValueAtTime(0.82, start);
+    lowpass.Q.setValueAtTime(0.72, start);
+    highpass.frequency.setValueAtTime(startHighpass, start);
+    highpass.frequency.exponentialRampToValueAtTime(endHighpass, Math.max(start + 0.02, end));
+    lowpass.frequency.setValueAtTime(startLowpass, start);
+    lowpass.frequency.exponentialRampToValueAtTime(endLowpass, Math.max(start + 0.02, end));
+  });
   timelineEvents.filter((event) => event.type === "filter" && event.time + event.duration >= schedule.cursor).forEach((event) => {
     const params = { ...defaultEventParams("filter"), ...(event.params || {}) };
     const start = scheduledTime(Math.max(event.time, schedule.cursor));
@@ -843,6 +868,7 @@ async function detectBeatAnchor() {
     renderTimeline();
     renderInspector();
     updateSourceEditorUI();
+    renderSourceMusicalMap();
     updateTransitionReadout();
     showToast(`Golpe fijado en ${formatTime(segment.beatOffset)} del original`);
   } catch (error) {
@@ -1149,12 +1175,17 @@ function snapSourceToBeat(source, time, direction = "nearest") {
   return roundMillis(clamp(anchor + beatIndex * beat, 0, source.duration));
 }
 
-function phraseDurationFor(source, targetSeconds, maximumSeconds = source.duration) {
+function phraseDurationFor(source, targetSeconds, maximumSeconds = source.duration, preferredBars = "auto") {
   const bar = sourceBeatSeconds(source) * 4;
   const choices = [32, 16, 8, 4]
     .map((bars) => ({ bars, seconds: bars * bar }))
     .filter((choice) => choice.seconds <= maximumSeconds + 0.05);
   if (!choices.length) return { bars: 4, seconds: Math.min(maximumSeconds, 4 * bar) };
+  const requestedBars = Number(preferredBars);
+  if (Number.isFinite(requestedBars)) {
+    const preferred = choices.find((choice) => choice.bars === requestedBars);
+    if (preferred) return preferred;
+  }
   return choices.sort((a, b) => Math.abs(a.seconds - targetSeconds) - Math.abs(b.seconds - targetSeconds))[0];
 }
 
@@ -1170,10 +1201,10 @@ function activeOpeningTime(source) {
   return source.analysis?.longIntro ? source.analysis.introEnd : 0;
 }
 
-function makePhrase(source, label, candidateStart, targetDuration, intensity = 0.7) {
+function makePhrase(source, label, candidateStart, targetDuration, intensity = 0.7, preferredBars = "auto") {
   const start = snapSourceToBeat(source, clamp(candidateStart, 0, source.duration - 0.5), "before");
   const available = Math.max(0.5, source.duration - start);
-  const phrase = phraseDurationFor(source, targetDuration, available);
+  const phrase = phraseDurationFor(source, targetDuration, available, preferredBars);
   const end = snapSourceToBeat(source, Math.min(source.duration, start + phrase.seconds), "after");
   return {
     label,
@@ -1184,7 +1215,7 @@ function makePhrase(source, label, candidateStart, targetDuration, intensity = 0
   };
 }
 
-function buildRadioEditPlan(source, requestedDuration, openingSong = false) {
+function buildRadioEditPlan(source, requestedDuration, openingSong = false, preferredBars = "auto") {
   const total = Math.max(8, Math.min(requestedDuration, source.duration));
   const analysis = source.analysis || {};
   const chorus = strongestSection(source, "Estribillo");
@@ -1199,12 +1230,12 @@ function buildRadioEditPlan(source, requestedDuration, openingSong = false) {
   const mainLabel = preChorus ? "Pre-coro → estribillo" : chorus ? "Estribillo" : "Pasaje principal";
   const openingStart = activeOpeningTime(source);
   const openingPhrase = openingSong && total >= 22
-    ? makePhrase(source, "Intro reconocible", openingStart, Math.min(total * 0.3, sourceBeatSeconds(source) * 16), 0.5)
+    ? makePhrase(source, "Intro reconocible", openingStart, Math.min(total * 0.3, sourceBeatSeconds(source) * 16), 0.5, preferredBars === "16" ? 8 : preferredBars)
     : null;
   const mainBudget = Math.max(8, total - (openingPhrase ? openingPhrase.end - openingPhrase.start : 0));
-  const mainPhrase = makePhrase(source, mainLabel, mainStart, mainBudget, chorus?.intensity ?? 0.88);
+  const mainPhrase = makePhrase(source, mainLabel, mainStart, mainBudget, chorus?.intensity ?? 0.88, preferredBars);
   const separated = openingPhrase && mainPhrase.start - openingPhrase.end > sourceBeatSeconds(source) * 4;
-  return separated ? [openingPhrase, mainPhrase] : [makePhrase(source, mainLabel, openingSong ? Math.min(openingStart, mainStart) : mainStart, total, chorus?.intensity ?? 0.82)];
+  return separated ? [openingPhrase, mainPhrase] : [makePhrase(source, mainLabel, openingSong ? Math.min(openingStart, mainStart) : mainStart, total, chorus?.intensity ?? 0.82, preferredBars)];
 }
 
 function normalizedDjBpm(bpm) {
@@ -1219,6 +1250,13 @@ function djTempoCompatibility(previousSource, nextSource) {
   const next = normalizedDjBpm(nextSource?.bpm);
   const difference = Math.abs(previous - next) / Math.max(previous, next);
   return { compatible: difference <= 0.055, difference, previous, next };
+}
+
+function automaticTransitionMode(tempoMatch) {
+  if (autoMixSettings.transitionStyle === "clean") return "clean";
+  if (autoMixSettings.transitionStyle === "impact") return "impact";
+  if (autoMixSettings.transitionStyle === "blend") return tempoMatch.difference <= 0.11 ? "blend" : "impact";
+  return tempoMatch.compatible ? "blend" : "impact";
 }
 
 async function analyzeSelectedSources(keys) {
@@ -1252,7 +1290,7 @@ async function createAutomaticMix() {
   const session = {
     id: uniqueSessionId(title),
     title,
-    subtitle: "Frases completas · transiciones decididas por tempo y compás",
+    subtitle: "Frases completas · bass swap, filtros y echoes sincronizados",
     duration,
     status: "Borrador",
     version: "Smart DJ local",
@@ -1261,7 +1299,8 @@ async function createAutomaticMix() {
     waveform: Array.from({ length: 240 }, () => 0.025),
     segments: [],
     events: [],
-    changes: ["Máximo dos bloques musicales largos por canción", "Cortes ajustados a frases de 8 o 16 compases", "Crossfade solo con tempos compatibles; echo cut cuando no conviene forzar el beatmatch"],
+    changes: ["Máximo dos bloques musicales largos por canción", "Cortes ajustados a frases completas", "Bass swap en tempos compatibles; echo cut y filtro en cambios de tempo"],
+    autoMixSettings: { ...autoMixSettings },
     custom: true,
   };
   let cursor = 0;
@@ -1272,9 +1311,10 @@ async function createAutomaticMix() {
     const estimatedGain = source.analysis ? clamp(-16 - source.analysis.rmsDb, -5, 6) : 0;
     const remainingSongs = Math.max(1, keys.length - index);
     const adaptiveDuration = Math.max(8, (duration - cursor) / remainingSongs);
-    const plan = buildRadioEditPlan(source, Math.max(requestedDuration * 0.75, adaptiveDuration), index === 0);
+    const plan = buildRadioEditPlan(source, Math.max(requestedDuration * 0.75, adaptiveDuration), index === 0, autoMixSettings.phraseBars);
     const tempoMatch = previousSource ? djTempoCompatibility(previousSource, source) : null;
-    const transitionOverlap = tempoMatch?.compatible
+    const transitionMode = tempoMatch ? automaticTransitionMode(tempoMatch) : "clean";
+    const transitionOverlap = transitionMode === "blend"
       ? clamp(Math.min(sourceBeatSeconds(previousSource) * 4, sourceBeatSeconds(source) * 4), 1.2, 2.8)
       : previousSource ? 0.06 : 0;
     const songStart = roundTime(Math.max(0, cursor - transitionOverlap));
@@ -1299,7 +1339,7 @@ async function createAutomaticMix() {
         transition: sectionIndex
           ? "Salto de frase al downbeat"
           : index
-            ? tempoMatch.compatible ? "Mezcla de 4 tiempos · tempo compatible" : "Echo cut · cambio de tempo"
+            ? transitionMode === "blend" ? "Bass swap · mezcla de 4 tiempos" : transitionMode === "impact" ? "Echo cut · cambio de tempo" : "Corte limpio al downbeat"
             : "Entrada reconocible",
         note: `${section.label} · ${section.bars} compases completos · intensidad ${Math.round(section.intensity * 100)}%. El motor evita cortar palabras o frases a mitad.`,
         sectionLabel: section.label,
@@ -1318,17 +1358,53 @@ async function createAutomaticMix() {
     });
     const lastSongSegment = session.segments.at(-1);
     if (previousSongLast && firstSongSegment) {
-      previousSongLast.fadeOut = tempoMatch.compatible ? transitionOverlap : 0.04;
-      if (!tempoMatch.compatible) {
+      previousSongLast.fadeOut = transitionMode === "blend" ? transitionOverlap : 0.04;
+      const fxEnergy = clamp(autoMixSettings.fxIntensity, 0, 1);
+      if (transitionMode === "blend") {
+        const highpassOut = 90 + fxEnergy * 170;
+        const lowpassOut = 14000 - fxEnergy * 6200;
+        const highpassIn = 110 + fxEnergy * 230;
+        session.events.push({
+          id: `event-auto-blend-out-${Date.now()}-${index}`,
+          type: "blend",
+          label: "Bass swap · salida",
+          time: firstSongSegment.start,
+          duration: transitionOverlap,
+          amount: fxEnergy,
+          trackId: previousSongLast.id,
+          params: { role: "out", startHighpass: 20, endHighpass: highpassOut, startLowpass: 20000, endLowpass: lowpassOut },
+        });
+        session.events.push({
+          id: `event-auto-blend-in-${Date.now()}-${index}`,
+          type: "blend",
+          label: "Bass swap · entrada",
+          time: firstSongSegment.start,
+          duration: transitionOverlap,
+          amount: fxEnergy,
+          trackId: firstSongSegment.id,
+          params: { role: "in", startHighpass: highpassIn, endHighpass: 20, startLowpass: 9000 + fxEnergy * 1000, endLowpass: 20000 },
+        });
+      } else if (transitionMode === "impact") {
+        const echoDuration = clamp(sourceBeatSeconds(previousSource) * 2, 0.55, 1.25);
         session.events.push({
           id: `event-auto-${Date.now()}-${index}`,
           type: "echo",
           label: "Echo cut de salida",
-          time: roundTime(Math.max(previousSongLast.start, previousSongLast.end - 0.72)),
-          duration: 0.72,
-          amount: 0.42,
+          time: roundTime(Math.max(previousSongLast.start, previousSongLast.end - echoDuration)),
+          duration: echoDuration,
+          amount: fxEnergy,
           trackId: previousSongLast.id,
-          params: { ...defaultEventParams("echo"), mix: 0.3, feedback: 0.24 },
+          params: { ...defaultEventParams("echo"), delayBeats: 0.5, mix: 0.22 + fxEnergy * 0.32, feedback: 0.18 + fxEnergy * 0.22 },
+        });
+        session.events.push({
+          id: `event-auto-filter-${Date.now()}-${index}`,
+          type: "filter",
+          label: "Lift HPF de salida",
+          time: roundTime(Math.max(previousSongLast.start, previousSongLast.end - echoDuration)),
+          duration: echoDuration,
+          amount: fxEnergy,
+          trackId: previousSongLast.id,
+          params: { filterMode: "highpass", startHz: 20, endHz: 900 + fxEnergy * 2300, resonance: 0.8 + fxEnergy * 0.8 },
         });
       }
     }
@@ -2613,6 +2689,12 @@ function eventParameterFields(event) {
     <label>LPF Hz<input data-event-param="lowpass" type="number" min="80" max="20000" step="10" value="${params.lowpass}"></label>
     <label>Echo mix<input data-event-param="mix" type="number" min="0" max="1" step="0.01" value="${params.mix}"></label>
     <label>Feedback<input data-event-param="feedback" type="number" min="0" max="0.86" step="0.01" value="${params.feedback}"></label>`;
+  if (event.type === "blend") return `
+    <label>Rol<select data-event-param="role"><option value="out"${params.role === "out" ? " selected" : ""}>Salida</option><option value="in"${params.role === "in" ? " selected" : ""}>Entrada</option></select></label>
+    <label>HPF inicio<input data-event-param="startHighpass" type="number" min="20" max="18000" step="10" value="${params.startHighpass}"></label>
+    <label>HPF final<input data-event-param="endHighpass" type="number" min="20" max="18000" step="10" value="${params.endHighpass}"></label>
+    <label>LPF inicio<input data-event-param="startLowpass" type="number" min="80" max="20000" step="10" value="${params.startLowpass}"></label>
+    <label>LPF final<input data-event-param="endLowpass" type="number" min="80" max="20000" step="10" value="${params.endLowpass}"></label>`;
   return "";
 }
 
@@ -3794,6 +3876,7 @@ function openSourceEditor() {
   requestAnimationFrame(() => {
     drawSourceWaveform();
     updateSourceEditorUI();
+    renderSourceMusicalMap();
   });
 }
 
@@ -3810,6 +3893,138 @@ function drawSourceWaveform() {
   const source = sourceFor();
   if (!source) return;
   drawBars(sourceCanvas, source.waveform, -1, { background: "#111516", base: "#4a5356" });
+}
+
+function sectionColor(label, fallback = "#55d6ff") {
+  if (SECTION_COLORS[label]) return SECTION_COLORS[label];
+  const normalized = String(label || "").toLowerCase();
+  if (normalized.includes("intro")) return SECTION_COLORS.Intro;
+  if (normalized.includes("pre")) return SECTION_COLORS["Pre-coro"];
+  if (normalized.includes("estribillo") || normalized.includes("coro")) return SECTION_COLORS.Estribillo;
+  if (normalized.includes("puente")) return SECTION_COLORS.Puente;
+  if (normalized.includes("estrofa")) return SECTION_COLORS.Estrofa;
+  return fallback;
+}
+
+function rippleTimelineAfter(anchorId, delta, boundary, shiftAnchorTail = false) {
+  if (Math.abs(delta) < 0.01) return;
+  const session = currentSession();
+  const anchorIndex = session.segments.findIndex((candidate) => candidate.id === anchorId);
+  session.segments.forEach((candidate, index) => {
+    if (index <= anchorIndex) return;
+    candidate.start = roundTime(Math.max(0, candidate.start + delta));
+    candidate.end = roundTime(Math.max(candidate.start + 0.05, candidate.end + delta));
+  });
+  session.events.forEach((event) => {
+    const ownerIndex = session.segments.findIndex((candidate) => candidate.id === event.trackId);
+    const followsAnchor = ownerIndex > anchorIndex || (!event.trackId && event.time >= boundary - 0.02);
+    const belongsToAnchorTail = shiftAnchorTail
+      && event.trackId === anchorId
+      && event.time >= boundary - 4.1;
+    if (followsAnchor || belongsToAnchorTail) event.time = roundTime(Math.max(0, event.time + delta));
+  });
+  session.duration = roundTime(Math.max(30, session.duration + delta));
+}
+
+function useDetectedSourceSection(section, insert = false) {
+  const source = sourceFor();
+  const segment = selectedSegment();
+  if (!source || !segment || !section) return;
+  const sourceIn = snapSourceToBeat(source, section.start, "before");
+  const sourceOut = snapSourceToBeat(source, section.end, "after");
+  const sectionDuration = Math.max(0.5, sourceOut - sourceIn);
+  const session = currentSession();
+  if (insert) {
+    const insertAt = state.selectedIndex + 1;
+    const overlap = Math.min(0.12, sectionDuration / 4);
+    const start = roundTime(segment.end - overlap);
+    rippleTimelineAfter(segment.id, sectionDuration - overlap, segment.end - 0.02);
+    const clone = structuredClone(segment);
+    clone.id = createSegmentId(session, "section");
+    clone.start = start;
+    clone.end = roundTime(start + sectionDuration);
+    clone.sourceIn = sourceIn;
+    clone.sourceOut = sourceOut;
+    clone.sectionLabel = section.label;
+    clone.sectionIntensity = section.intensity;
+    clone.color = sectionColor(section.label, clone.color);
+    clone.transition = "Sección insertada al beat";
+    clone.note = `${section.label} detectado · encajado desde el mapa musical.`;
+    clone.fadeIn = overlap;
+    clone.fadeOut = 0.04;
+    refreshSourceText(clone);
+    session.segments.splice(insertAt, 0, clone);
+    state.selectedIndex = insertAt;
+  } else {
+    const oldEnd = segment.end;
+    const oldDuration = segment.end - segment.start;
+    segment.sourceIn = sourceIn;
+    segment.sourceOut = sourceOut;
+    segment.end = roundTime(segment.start + sectionDuration);
+    segment.sectionLabel = section.label;
+    segment.sectionIntensity = section.intensity;
+    segment.color = sectionColor(section.label, segment.color);
+    segment.note = `${section.label} detectado · bordes cuantizados al beat.`;
+    refreshSourceText(segment);
+    rippleTimelineAfter(segment.id, sectionDuration - oldDuration, oldEnd, true);
+  }
+  applySessionDefaults(session);
+  saveDraft();
+  renderWorkspace();
+  openSourceEditor();
+  showToast(`${section.label} ${insert ? "insertado" : "aplicado"} · corte ajustado al beat`);
+}
+
+function renderSourceMusicalMap() {
+  const source = sourceFor();
+  const segment = selectedSegment();
+  if (!source || !segment || !sourceSectionMap || !sourceArrangement) return;
+  const sections = source.analysis?.sections?.length
+    ? source.analysis.sections
+    : [{ label: "Canción completa", start: 0, end: source.duration, intensity: 0.55 }];
+  sourceSectionMap.innerHTML = "";
+  sections.forEach((section) => {
+    const button = document.createElement("button");
+    const overlap = Math.max(0, Math.min(segment.sourceOut, section.end) - Math.max(segment.sourceIn, section.start));
+    const selected = overlap >= Math.min(section.end - section.start, segment.sourceOut - segment.sourceIn) * 0.55;
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(selected));
+    button.title = `Usar ${section.label} · ${formatTime(section.start)}–${formatTime(section.end)}`;
+    button.style.setProperty("--section-color", sectionColor(section.label));
+    button.style.setProperty("--section-grow", Math.max(0.3, section.end - section.start));
+    button.style.setProperty("--section-intensity", clamp(section.intensity || 0.55, 0.2, 1));
+    button.innerHTML = `<strong>${escapeMarkup(section.label)}</strong><small>${formatTime(section.start)}–${formatTime(section.end)}</small>`;
+    button.addEventListener("click", () => useDetectedSourceSection(section, false));
+    button.addEventListener("dblclick", () => useDetectedSourceSection(section, true));
+    sourceSectionMap.appendChild(button);
+  });
+  sourceArrangement.innerHTML = "";
+  currentSession().segments.forEach((candidate, index) => {
+    if (candidate.sourceKey !== segment.sourceKey) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.draggable = true;
+    button.className = candidate.id === segment.id ? "active" : "";
+    button.style.setProperty("--section-color", sectionColor(candidate.sectionLabel, candidate.color));
+    button.textContent = candidate.sectionLabel || candidate.name;
+    button.title = `${candidate.name} · ${formatTime(candidate.start)}–${formatTime(candidate.end)} · arrastra para reordenar`;
+    button.addEventListener("click", () => { selectTrackIndex(index); renderSourceMusicalMap(); });
+    button.addEventListener("dragstart", (event) => startTrackOrderDrag(event, candidate, button));
+    button.addEventListener("dragend", () => { draggedTrackId = null; button.classList.remove("dragging"); renderSourceMusicalMap(); });
+    bindTrackOrderTarget(button, index, "x");
+    sourceArrangement.appendChild(button);
+  });
+}
+
+function detectedSectionForSelection() {
+  const source = sourceFor();
+  const segment = selectedSegment();
+  if (!source || !segment) return null;
+  return [...(source.analysis?.sections || [])].sort((a, b) => {
+    const overlapA = Math.max(0, Math.min(segment.sourceOut, a.end) - Math.max(segment.sourceIn, a.start));
+    const overlapB = Math.max(0, Math.min(segment.sourceOut, b.end) - Math.max(segment.sourceIn, b.start));
+    return overlapB - overlapA || (b.intensity || 0) - (a.intensity || 0);
+  })[0] || { label: "Fragmento", start: segment.sourceIn, end: segment.sourceOut, intensity: 0.6 };
 }
 
 function updateSourceEditorUI() {
@@ -3898,6 +4113,7 @@ function applySourceInputs() {
   renderTimeline();
   renderInspector();
   updateSourceEditorUI();
+  renderSourceMusicalMap();
 }
 
 async function previewSourceSelection() {
@@ -4294,6 +4510,20 @@ document.querySelector("#export-session-button").addEventListener("click", expor
 document.querySelector("#import-session-button").addEventListener("click", () => sessionPackageInput.click());
 sessionPackageInput.addEventListener("change", importPortableSession);
 audioUpload.addEventListener("change", handleAudioUpload);
+autoTransitionStyle.querySelectorAll("button").forEach((button) => button.addEventListener("click", () => {
+  autoMixSettings.transitionStyle = button.dataset.value;
+  autoTransitionStyle.querySelectorAll("button").forEach((candidate) => candidate.setAttribute("aria-pressed", String(candidate === button)));
+}));
+autoPhraseSize.querySelectorAll("button").forEach((button) => button.addEventListener("click", () => {
+  autoMixSettings.phraseBars = button.dataset.value;
+  autoPhraseSize.querySelectorAll("button").forEach((candidate) => candidate.setAttribute("aria-pressed", String(candidate === button)));
+}));
+autoFxIntensity.addEventListener("input", () => {
+  autoMixSettings.fxIntensity = Number(autoFxIntensity.value);
+  autoFxIntensityValue.value = `${Math.round(autoMixSettings.fxIntensity * 100)}%`;
+});
+document.querySelector("#insert-source-section").addEventListener("click", () => useDetectedSourceSection(detectedSectionForSelection(), true));
+document.querySelector("#align-source-section").addEventListener("click", () => { alignSelectedPhrase(); renderSourceMusicalMap(); });
 sourceSelection.addEventListener("pointerdown", startSourceDrag);
 sourceInInput.addEventListener("change", applySourceInputs);
 sourceOutInput.addEventListener("change", applySourceInputs);

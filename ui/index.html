@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0b0d0e" />
     <title>Mix Shary · Sala de edición</title>
-    <link rel="stylesheet" href="./styles.css?v=20260928-8" />
+    <link rel="stylesheet" href="./styles.css?v=20260929-9" />
   </head>
   <body>
     <div class="app-shell">
@@ -46,6 +46,11 @@
             <div class="smart-dj-mode">
               <strong><i></i> SMART DJ</strong>
               <span>Frases completas · 8/16 compases · máximo 2 cortes por canción</span>
+            </div>
+            <div class="smart-dj-controls" aria-label="Control del mix automático">
+              <div class="smart-control-row"><span>TRANSICIÓN</span><div class="smart-choice" id="auto-transition-style"><button type="button" data-value="smart" aria-pressed="true">Smart</button><button type="button" data-value="blend">Club</button><button type="button" data-value="impact">Impacto</button><button type="button" data-value="clean">Limpia</button></div></div>
+              <div class="smart-control-row"><span>FRASES</span><div class="smart-choice" id="auto-phrase-size"><button type="button" data-value="auto" aria-pressed="true">Auto</button><button type="button" data-value="8">8</button><button type="button" data-value="16">16</button></div></div>
+              <label class="smart-intensity"><span>ENERGÍA FX</span><input id="auto-fx-intensity" type="range" min="0" max="1" value="0.72" step="0.01"><output id="auto-fx-intensity-value">72%</output></label>
             </div>
           </div>
           <div id="library-list" class="library-list"></div>
@@ -326,6 +331,11 @@
               <button class="source-handle source-handle-right" data-source-handle="right" aria-label="Recortar final"></button>
             </div>
           </div>
+          <section class="source-musical-map" aria-label="Mapa musical de la canción">
+            <div class="source-map-head"><div><strong>Mapa musical</strong><span>Elige una sección detectada; los bordes se ajustan al beat.</span></div><div class="section-legend"><i class="intro"></i>Intro <i class="verse"></i>Estrofa <i class="pre"></i>Pre-coro <i class="chorus"></i>Estribillo <i class="bridge"></i>Puente</div></div>
+            <div id="source-section-map" class="source-section-map"></div>
+            <div class="source-arrange-row"><span>EN ESTE MIX</span><div id="source-arrangement" class="source-arrangement"></div><button id="insert-source-section" type="button">+ Insertar sección</button><button id="align-source-section" type="button">Encajar con anterior</button></div>
+          </section>
           <footer class="source-values">
             <label>Entrada original <input id="source-in-input" type="number" min="0" step="0.01" /></label>
             <label>Salida original <input id="source-out-input" type="number" min="0" step="0.01" /></label>
@@ -375,6 +385,6 @@
       <div><strong id="render-title">Creando master de alta calidad</strong><span id="render-status">Preparando fuentes a 48 kHz / 24-bit…</span></div>
     </div>
     <script src="./data.js?v=20260927-3"></script>
-    <script src="./app.js?v=20260929-16"></script>
+    <script src="./app.js?v=20260929-17"></script>
   </body>
 </html>
