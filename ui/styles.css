@@ -98,6 +98,10 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .library-batch #auto-mix-button:disabled { color: var(--muted-2); border-color: var(--line); background: #15191a; cursor: default; }
 .library-batch #auto-mix-button:disabled small { color: var(--muted-2); }
 .library-batch #auto-mix-button.loading { color: var(--accent); border-color: rgba(213,255,63,.3); background: #151a13; }
+.smart-dj-mode { grid-column: 1 / -1; display: grid; gap: 3px; padding: 7px 8px; border: 1px solid rgba(85,214,255,.16); border-radius: 6px; background: linear-gradient(110deg, rgba(85,214,255,.055), rgba(213,255,63,.025)); }
+.smart-dj-mode strong { display: flex; align-items: center; gap: 5px; color: #55d6ff; font: 700 7px/1 ui-monospace, monospace; letter-spacing: .12em; }
+.smart-dj-mode strong i { width: 5px; height: 5px; border-radius: 50%; background: #55d6ff; box-shadow: 0 0 8px rgba(85,214,255,.75); }
+.smart-dj-mode span { color: var(--muted); font-size: 7px; line-height: 1.35; }
 .library-list { display: grid; gap: 2px; max-height: 250px; margin-top: 9px; overflow-y: auto; }
 .library-item { width: 100%; display: grid; grid-template-columns: 22px minmax(0,1fr) 22px; gap: 6px; align-items: center; border: 1px solid transparent; border-radius: 6px; padding: 7px 6px; color: var(--text); background: transparent; text-align: left; }
 .library-item:hover { background: var(--surface-2); }

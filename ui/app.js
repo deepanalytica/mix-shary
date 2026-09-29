@@ -755,6 +755,38 @@ function estimateBpm(buffer) {
   return bestBpm;
 }
 
+function estimateBeatOffset(buffer, bpm) {
+  const channel = buffer.getChannelData(0);
+  const hop = 512;
+  const windowSize = 1024;
+  const beatSamples = Math.max(hop, (60 * buffer.sampleRate) / Math.max(1, bpm));
+  const sampleLimit = Math.min(channel.length, Math.floor(buffer.sampleRate * 75));
+  const onsets = [];
+  let previousEnergy = 0;
+  for (let start = 0; start + windowSize < sampleLimit; start += hop) {
+    let energy = 0;
+    for (let sample = start; sample < start + windowSize; sample += 4) energy += channel[sample] * channel[sample];
+    energy = Math.sqrt(energy / (windowSize / 4));
+    onsets.push({ sample: start, strength: Math.max(0, energy - previousEnergy * 0.86) });
+    previousEnergy = energy;
+  }
+  let bestOffset = 0;
+  let bestScore = -1;
+  for (let offset = 0; offset < beatSamples; offset += hop) {
+    let score = 0;
+    onsets.forEach((onset) => {
+      const phase = ((onset.sample - offset) % beatSamples + beatSamples) % beatSamples;
+      const distance = Math.min(phase, beatSamples - phase) / beatSamples;
+      if (distance < 0.18) score += onset.strength * (1 - distance / 0.18);
+    });
+    if (score > bestScore) {
+      bestScore = score;
+      bestOffset = offset;
+    }
+  }
+  return roundMillis(bestOffset / buffer.sampleRate);
+}
+
 function beatAnchorFor(segment) {
   return Number.isFinite(segment?.beatOffset) ? segment.beatOffset : segment?.sourceIn || 0;
 }
@@ -1022,13 +1054,15 @@ async function registerImportedFile(record, addToTimeline = false) {
   const fileUrl = URL.createObjectURL(record.blob);
   const cleanName = record.name.replace(/\.[^.]+$/, "");
   const [artist, ...titleParts] = cleanName.split(" - ");
+  const bpm = estimateBpm(decoded);
   data.library[key] = {
     name: titleParts.length ? titleParts.join(" - ") : cleanName,
     artist: titleParts.length ? artist : "Archivo personal",
     file: fileUrl,
     duration: decoded.duration,
     waveform: peaksFromBuffer(decoded),
-    bpm: estimateBpm(decoded),
+    bpm,
+    beatOffset: estimateBeatOffset(decoded, bpm),
     analysis: analyzeAudioStructure(decoded),
     imported: true,
     recordId: record.id,
@@ -1091,8 +1125,8 @@ function updateAutoMixControls() {
   selectAllSourcesButton.textContent = allSelected ? "Quitar todas" : "Seleccionar todas";
   autoMixButton.disabled = selectedCount === 0 || autoMixCooking;
   autoMixButton.classList.toggle("loading", autoMixCooking);
-  autoMixButton.querySelector("span").textContent = autoMixCooking ? "Analizando" : "Cocinar radio edits";
-  autoMixCount.textContent = autoMixCooking ? "Buscando secciones…" : selectedCount ? `${selectedCount} ${selectedCount === 1 ? "canción" : "canciones"}` : "Elige canciones";
+  autoMixButton.querySelector("span").textContent = autoMixCooking ? "Analizando frases" : "Crear mezcla DJ";
+  autoMixCount.textContent = autoMixCooking ? "Cuadrando compases…" : selectedCount ? `${selectedCount} ${selectedCount === 1 ? "canción" : "canciones"} · Smart DJ` : "Elige canciones";
 }
 
 function toggleAllLibrarySources() {
@@ -1103,59 +1137,98 @@ function toggleAllLibrarySources() {
   renderLibrary();
 }
 
-function radioEditSection(source, label, duration, fallbackStart) {
-  const sections = source.analysis?.sections || [];
-  const candidates = sections.filter((section) => section.label === label);
-  let candidate = null;
-  if (label === "Intro") candidate = candidates[0];
-  else if (label === "Estribillo") candidate = [...candidates].sort((a, b) => b.intensity - a.intensity)[0];
-  else candidate = [...candidates].sort((a, b) => b.intensity - a.intensity)[0];
-  const desiredDuration = Math.max(1.8, Math.min(duration, source.duration));
-  let start = candidate?.start ?? fallbackStart;
-  if (candidate && label === "Pre-coro") start = Math.max(candidate.start, candidate.end - desiredDuration);
-  if (label === "Intro" && source.analysis?.longIntro) start = Math.max(start, source.analysis.introEnd);
-  start = clamp(start, 0, Math.max(0, source.duration - desiredDuration));
-  const silence = source.analysis?.silences?.find((range) => range.start < start + desiredDuration - 0.8 && range.end > start + 0.8);
-  if (silence && label !== "Intro") start = clamp(silence.end + 0.12, 0, Math.max(0, source.duration - desiredDuration));
+function sourceBeatSeconds(source) {
+  return 60 / normalizedDjBpm(source.bpm);
+}
+
+function snapSourceToBeat(source, time, direction = "nearest") {
+  const beat = sourceBeatSeconds(source);
+  const anchor = Number.isFinite(source.beatOffset) ? source.beatOffset : 0;
+  const position = (time - anchor) / beat;
+  const beatIndex = direction === "before" ? Math.floor(position) : direction === "after" ? Math.ceil(position) : Math.round(position);
+  return roundMillis(clamp(anchor + beatIndex * beat, 0, source.duration));
+}
+
+function phraseDurationFor(source, targetSeconds, maximumSeconds = source.duration) {
+  const bar = sourceBeatSeconds(source) * 4;
+  const choices = [32, 16, 8, 4]
+    .map((bars) => ({ bars, seconds: bars * bar }))
+    .filter((choice) => choice.seconds <= maximumSeconds + 0.05);
+  if (!choices.length) return { bars: 4, seconds: Math.min(maximumSeconds, 4 * bar) };
+  return choices.sort((a, b) => Math.abs(a.seconds - targetSeconds) - Math.abs(b.seconds - targetSeconds))[0];
+}
+
+function strongestSection(source, label) {
+  return [...(source.analysis?.sections || [])]
+    .filter((section) => section.label === label)
+    .sort((a, b) => b.intensity - a.intensity)[0] || null;
+}
+
+function activeOpeningTime(source) {
+  const leadingSilence = source.analysis?.silences?.find((range) => range.start <= 0.25);
+  if (leadingSilence) return Math.min(source.duration, leadingSilence.end + 0.08);
+  return source.analysis?.longIntro ? source.analysis.introEnd : 0;
+}
+
+function makePhrase(source, label, candidateStart, targetDuration, intensity = 0.7) {
+  const start = snapSourceToBeat(source, clamp(candidateStart, 0, source.duration - 0.5), "before");
+  const available = Math.max(0.5, source.duration - start);
+  const phrase = phraseDurationFor(source, targetDuration, available);
+  const end = snapSourceToBeat(source, Math.min(source.duration, start + phrase.seconds), "after");
   return {
     label,
     start: roundTime(start),
-    end: roundTime(Math.min(source.duration, start + desiredDuration)),
-    intensity: candidate?.intensity ?? (label === "Estribillo" ? 0.92 : label === "Pre-coro" ? 0.72 : label === "Intro" ? 0.48 : 0.62),
+    end: roundTime(Math.max(start + 0.5, Math.min(source.duration, end))),
+    intensity,
+    bars: phrase.bars,
   };
 }
 
-function buildRadioEditPlan(source, requestedDuration) {
+function buildRadioEditPlan(source, requestedDuration, openingSong = false) {
   const total = Math.max(8, Math.min(requestedDuration, source.duration));
   const analysis = source.analysis || {};
-  const chorusStart = analysis.chorus?.start ?? analysis.bestSection?.start ?? clamp(source.duration * 0.42, 8, Math.max(8, source.duration - 12));
-  const firstChorus = analysis.choruses?.[0]?.start ?? chorusStart;
-  const bridgeStart = analysis.choruses?.length > 1
-    ? (analysis.choruses[0].end + analysis.choruses[1].start) / 2
-    : source.duration * 0.66;
-  const specs = total >= 34
-    ? [
-        ["Intro", 0.14, analysis.longIntro ? analysis.introEnd : 0],
-        ["Estrofa", 0.22, Math.max(analysis.introEnd || 0, firstChorus - 26)],
-        ["Pre-coro", 0.12, Math.max(0, firstChorus - total * 0.12)],
-        ["Estribillo", 0.38, chorusStart],
-        ["Puente", 0.14, bridgeStart],
-      ]
-    : [
-        ["Intro", 0.16, analysis.longIntro ? analysis.introEnd : 0],
-        ["Estrofa", 0.24, Math.max(analysis.introEnd || 0, firstChorus - 22)],
-        ["Pre-coro", 0.14, Math.max(0, firstChorus - total * 0.14)],
-        ["Estribillo", 0.46, chorusStart],
-      ];
-  return specs.map(([label, ratio, fallback]) => radioEditSection(source, label, total * ratio, fallback));
+  const chorus = strongestSection(source, "Estribillo");
+  const preChoruses = (analysis.sections || []).filter((section) => section.label === "Pre-coro");
+  const preChorus = chorus
+    ? [...preChoruses].filter((section) => section.end <= chorus.start + 1).sort((a, b) => b.end - a.end)[0]
+    : strongestSection(source, "Pre-coro");
+  const mainStart = preChorus?.start
+    ?? chorus?.start
+    ?? analysis.bestSection?.start
+    ?? clamp(source.duration * 0.38, 0, Math.max(0, source.duration - total));
+  const mainLabel = preChorus ? "Pre-coro → estribillo" : chorus ? "Estribillo" : "Pasaje principal";
+  const openingStart = activeOpeningTime(source);
+  const openingPhrase = openingSong && total >= 22
+    ? makePhrase(source, "Intro reconocible", openingStart, Math.min(total * 0.3, sourceBeatSeconds(source) * 16), 0.5)
+    : null;
+  const mainBudget = Math.max(8, total - (openingPhrase ? openingPhrase.end - openingPhrase.start : 0));
+  const mainPhrase = makePhrase(source, mainLabel, mainStart, mainBudget, chorus?.intensity ?? 0.88);
+  const separated = openingPhrase && mainPhrase.start - openingPhrase.end > sourceBeatSeconds(source) * 4;
+  return separated ? [openingPhrase, mainPhrase] : [makePhrase(source, mainLabel, openingSong ? Math.min(openingStart, mainStart) : mainStart, total, chorus?.intensity ?? 0.82)];
+}
+
+function normalizedDjBpm(bpm) {
+  let value = Number(bpm) || 120;
+  while (value < 82) value *= 2;
+  while (value > 164) value /= 2;
+  return value;
+}
+
+function djTempoCompatibility(previousSource, nextSource) {
+  const previous = normalizedDjBpm(previousSource?.bpm);
+  const next = normalizedDjBpm(nextSource?.bpm);
+  const difference = Math.abs(previous - next) / Math.max(previous, next);
+  return { compatible: difference <= 0.055, difference, previous, next };
 }
 
 async function analyzeSelectedSources(keys) {
   const results = await Promise.allSettled(keys.map(async (key) => {
     const source = data.library[key];
-    if (!source.analysis?.sections?.length) {
+    if (!source.analysis?.sections?.length || !Number.isFinite(source.beatOffset)) {
       const buffer = await loadPreviewBuffer(source);
-      source.analysis = analyzeAudioStructure(buffer);
+      source.bpm = source.bpm || estimateBpm(buffer);
+      source.beatOffset = estimateBeatOffset(buffer, source.bpm);
+      if (!source.analysis?.sections?.length) source.analysis = analyzeAudioStructure(buffer);
     }
   }));
   return results.filter((result) => result.status === "rejected").length;
@@ -1174,38 +1247,43 @@ async function createAutomaticMix() {
   closeSourceEditor();
   const previousSession = currentSession();
   const duration = Math.max(30, previousSession.duration || 180);
-  const overlap = keys.length > 1 ? 0.65 : 0;
-  const requestedDuration = (duration + overlap * Math.max(0, keys.length - 1)) / keys.length;
-  const title = `Radio edits · ${new Date().toLocaleDateString("es-CL", { day: "2-digit", month: "short" })}`;
+  const requestedDuration = duration / keys.length;
+  const title = `Smart DJ · ${new Date().toLocaleDateString("es-CL", { day: "2-digit", month: "short" })}`;
   const session = {
     id: uniqueSessionId(title),
     title,
-    subtitle: "Radio edits asistidos · listo para revisar y ensayar",
+    subtitle: "Frases completas · transiciones decididas por tempo y compás",
     duration,
     status: "Borrador",
-    version: "Radio Edit local",
+    version: "Smart DJ local",
     master: "local:",
     rehearsal: "local:",
     waveform: Array.from({ length: 240 }, () => 0.025),
     segments: [],
     events: [],
-    changes: ["Cada canción se condensó como radio edit", "Intro, estrofa, pre-coro, estribillo y puente se seleccionaron cuando estaban disponibles", "Transiciones, fades y nivel estimado se aplicaron por canción"],
+    changes: ["Máximo dos bloques musicales largos por canción", "Cortes ajustados a frases de 8 o 16 compases", "Crossfade solo con tempos compatibles; echo cut cuando no conviene forzar el beatmatch"],
     custom: true,
   };
   let cursor = 0;
   let previousSongLast = null;
+  let previousSource = null;
   keys.forEach((key, index) => {
     const source = data.library[key];
     const estimatedGain = source.analysis ? clamp(-16 - source.analysis.rmsDb, -5, 6) : 0;
-    const plan = buildRadioEditPlan(source, requestedDuration);
-    const songStart = roundTime(Math.max(0, cursor - (index ? overlap : 0)));
+    const remainingSongs = Math.max(1, keys.length - index);
+    const adaptiveDuration = Math.max(8, (duration - cursor) / remainingSongs);
+    const plan = buildRadioEditPlan(source, Math.max(requestedDuration * 0.75, adaptiveDuration), index === 0);
+    const tempoMatch = previousSource ? djTempoCompatibility(previousSource, source) : null;
+    const transitionOverlap = tempoMatch?.compatible
+      ? clamp(Math.min(sourceBeatSeconds(previousSource) * 4, sourceBeatSeconds(source) * 4), 1.2, 2.8)
+      : previousSource ? 0.06 : 0;
+    const songStart = roundTime(Math.max(0, cursor - transitionOverlap));
     let songCursor = songStart;
     let firstSongSegment = null;
     plan.forEach((section, sectionIndex) => {
-      const internalOverlap = sectionIndex ? 0.06 : 0;
-      const start = roundTime(Math.max(songStart, songCursor - internalOverlap));
+      const start = roundTime(songCursor);
       const clipDuration = section.end - section.start;
-      const end = roundTime(Math.min(duration, start + clipDuration));
+      const end = roundTime(start + clipDuration);
       if (end - start < 0.5) return;
       const id = createSegmentId(session, `radio-${index + 1}-${sectionIndex + 1}`);
       const segment = {
@@ -1218,13 +1296,17 @@ async function createAutomaticMix() {
         sourceKey: key,
         sourceIn: section.start,
         sourceOut: roundTime(section.start + end - start),
-        transition: sectionIndex ? "Corte de radio al beat" : index ? "Crossfade entre canciones" : "Entrada reconocible",
-        note: `${section.label} probable · intensidad ${Math.round(section.intensity * 100)}%. Corte propuesto para conservar una frase reconocible.`,
+        transition: sectionIndex
+          ? "Salto de frase al downbeat"
+          : index
+            ? tempoMatch.compatible ? "Mezcla de 4 tiempos · tempo compatible" : "Echo cut · cambio de tempo"
+            : "Entrada reconocible",
+        note: `${section.label} · ${section.bars} compases completos · intensidad ${Math.round(section.intensity * 100)}%. El motor evita cortar palabras o frases a mitad.`,
         sectionLabel: section.label,
         sectionIntensity: section.intensity,
         color: colorForSection(section.label, colorForSegment({ sourceKey: key })),
         songGroupId: `radio-song-${index + 1}`,
-        fadeIn: sectionIndex ? 0.04 : index ? overlap : 0.04,
+        fadeIn: sectionIndex ? 0.025 : index ? transitionOverlap : 0.025,
         fadeOut: 0.04,
         fadeCurve: "equal-power",
         gainDb: roundTime(estimatedGain),
@@ -1236,22 +1318,22 @@ async function createAutomaticMix() {
     });
     const lastSongSegment = session.segments.at(-1);
     if (previousSongLast && firstSongSegment) {
-      previousSongLast.fadeOut = overlap;
-      const effectType = index % 2 === 0 ? "echo" : "filter";
-      session.events.push({
-        id: `event-auto-${Date.now()}-${index}`,
-        type: effectType,
-        label: effectType === "echo" ? "Echo entre canciones" : "Filtro entre canciones",
-        time: roundTime(Math.max(previousSongLast.start, previousSongLast.end - 1.1)),
-        duration: 1.1,
-        amount: 0.58,
-        trackId: previousSongLast.id,
-        params: effectType === "echo"
-          ? { ...defaultEventParams("echo"), mix: 0.42, feedback: 0.3 }
-          : { ...defaultEventParams("filter"), filterMode: "lowpass", startHz: 18000, endHz: 900 },
-      });
+      previousSongLast.fadeOut = tempoMatch.compatible ? transitionOverlap : 0.04;
+      if (!tempoMatch.compatible) {
+        session.events.push({
+          id: `event-auto-${Date.now()}-${index}`,
+          type: "echo",
+          label: "Echo cut de salida",
+          time: roundTime(Math.max(previousSongLast.start, previousSongLast.end - 0.72)),
+          duration: 0.72,
+          amount: 0.42,
+          trackId: previousSongLast.id,
+          params: { ...defaultEventParams("echo"), mix: 0.3, feedback: 0.24 },
+        });
+      }
     }
     previousSongLast = lastSongSegment;
+    previousSource = source;
     cursor = lastSongSegment?.end || cursor;
   });
   const lastSegment = session.segments.at(-1);
@@ -1260,12 +1342,12 @@ async function createAutomaticMix() {
     session.events.push({
       id: `event-auto-end-${Date.now()}`,
       type: "filter",
-      label: "Cierre suave",
-      time: roundTime(Math.max(lastSegment.start, lastSegment.end - 1.8)),
-      duration: 1.8,
-      amount: 0.58,
+      label: "Cierre musical",
+      time: roundTime(Math.max(lastSegment.start, lastSegment.end - 0.9)),
+      duration: 0.9,
+      amount: 0.4,
       trackId: lastSegment.id,
-      params: { ...defaultEventParams("filter"), filterMode: "lowpass", startHz: 18000, endHz: 520 },
+      params: { ...defaultEventParams("filter"), filterMode: "lowpass", startHz: 18000, endHz: 2200 },
     });
   }
   applySessionDefaults(session);
@@ -1284,7 +1366,7 @@ async function createAutomaticMix() {
   autoMixCooking = false;
   renderLibrary();
   const warning = analysisFailures ? ` · ${analysisFailures} sin análisis completo` : "";
-  showToast(`Radio edit creado con ${keys.length} ${keys.length === 1 ? "canción" : "canciones"}${warning} · el proyecto anterior quedó intacto`);
+  showToast(`Mezcla Smart DJ creada con ${keys.length} ${keys.length === 1 ? "canción" : "canciones"}${warning} · frases completas, sin picadillo`);
 }
 
 function addSourceToTimeline(key) {
