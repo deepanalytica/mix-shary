@@ -128,11 +128,11 @@ const EFFECT_DEFS = {
   sidechain: { label: "Sidechain", short: "DUCK", color: "#ff7474" },
 };
 function defaultEventParams(type) {
-  if (type === "echo") return { delayBeats: 1, mix: 0.72, feedback: 0.42 };
+  if (type === "echo") return { delayBeats: 1, mix: 0.72, feedback: 0.42, dryLevel: 0.16 };
   if (type === "filter") return { filterMode: "lowpass", startHz: 18000, endHz: 420, resonance: 1.2 };
   if (type === "fx") return { highpass: 20, lowpass: 20000, mix: 0, feedback: 0.32, delayBeats: 1 };
   if (type === "blend") return { role: "out", startHighpass: 20, endHighpass: 180, startLowpass: 20000, endLowpass: 9000 };
-  if (type === "loop") return { startBeats: 0.5, endBeats: 0.0625, feedback: 0.74, mix: 0.82 };
+  if (type === "loop") return { startBeats: 0.5, endBeats: 0.0625, feedback: 0.66, mix: 0.72, dryLevel: 0.1 };
   if (type === "cut") return { depth: 1 };
   return {};
 }
@@ -608,7 +608,8 @@ function connectProcessingGraph(context, sourceNode, segment, envelope, output, 
     lowpass.frequency.setValueAtTime(lowpass.frequency.value, start);
     lowpass.frequency.exponentialRampToValueAtTime(clamp(Number(params.lowpass) || 20000, 80, 20000), end);
   });
-  sourceNode.connect(highpass);
+  sourceNode.connect(envelope);
+  envelope.connect(highpass);
   highpass.connect(lowpass);
 
   let processed = lowpass;
@@ -623,50 +624,13 @@ function connectProcessingGraph(context, sourceNode, segment, envelope, output, 
   }
 
   const delayMix = effectIsActive(segment, "delay") ? clamp(Number(fx.delayMix) || 0, 0, 1) : 0;
-  const echoEvents = timelineEvents.filter((event) => ["echo", "fx", "loop"].includes(event.type) && event.time + event.duration >= schedule.cursor);
-  if (((Number(fx.delayMs) || 0) > 0 && delayMix > 0) || echoEvents.length) {
-    const dry = context.createGain();
-    const wet = context.createGain();
-    const delay = context.createDelay(2);
-    const feedback = context.createGain();
-    dry.gain.value = 1 - delayMix * 0.45;
-    wet.gain.value = delayMix;
-    delay.delayTime.value = (Number(fx.delayMs) || 0) > 0 ? clamp(Number(fx.delayMs) / 1000, 0, 2) : clamp(beatSeconds(segment) * 0.75, 0.12, 0.75);
-    feedback.gain.value = echoEvents.length ? 0.38 : 0.22;
-    echoEvents.forEach((event) => {
-      const params = { ...defaultEventParams(event.type), ...(event.params || {}) };
-      const start = scheduledTime(Math.max(event.time, schedule.cursor));
-      const end = scheduledTime(event.time + Math.max(0.2, event.duration));
-      const wetTarget = clamp(Number(params.mix ?? event.amount), 0, 1);
-      const feedbackTarget = clamp(Number(params.feedback) || 0.38, 0, 0.86);
-      const delayTarget = clamp(beatSeconds(segment) * (Number(params.delayBeats || params.startBeats) || 1), 0.04, 1.8);
-      delay.delayTime.setValueAtTime(delayTarget, start);
-      feedback.gain.setValueAtTime(feedbackTarget, start);
-      wet.gain.setValueAtTime(Math.max(0.001, delayMix), start);
-      wet.gain.linearRampToValueAtTime(Math.max(0.001, wetTarget), Math.min(end, start + 0.08));
-      if (event.type === "loop") {
-        const first = clamp(beatSeconds(segment) * Number(params.startBeats || 0.5), 0.04, 0.8);
-        const last = clamp(beatSeconds(segment) * Number(params.endBeats || 0.0625), 0.025, first);
-        const phaseOne = start + (end - start) * 0.44;
-        const phaseTwo = start + (end - start) * 0.76;
-        delay.delayTime.setValueAtTime(first, start);
-        delay.delayTime.setValueAtTime(Math.max(last * 4, last), phaseOne);
-        delay.delayTime.setValueAtTime(Math.max(last * 2, last), phaseTwo);
-        delay.delayTime.setValueAtTime(last, Math.max(phaseTwo + 0.02, end - 0.08));
-        feedback.gain.linearRampToValueAtTime(Math.min(0.86, feedbackTarget + 0.08), end);
-        wet.gain.exponentialRampToValueAtTime(0.001, Math.max(start + 0.1, end));
-      } else if (event.type === "echo") wet.gain.exponentialRampToValueAtTime(0.001, Math.max(start + 0.1, end));
-    });
-    processed.connect(dry);
-    dry.connect(envelope);
-    processed.connect(delay);
-    delay.connect(wet);
-    wet.connect(envelope);
-    delay.connect(feedback);
-    feedback.connect(delay);
-  } else {
-    processed.connect(envelope);
-  }
+  const eventIsActive = (event) => event.time + event.duration >= schedule.cursor;
+  const echoEvents = timelineEvents.filter((event) => ["echo", "fx"].includes(event.type) && eventIsActive(event));
+  const loopEvents = timelineEvents.filter((event) => event.type === "loop" && eventIsActive(event));
+  const hasEchoReturn = delayMix > 0 || echoEvents.length > 0;
+  const dry = context.createGain();
+  dry.gain.value = delayMix > 0 ? 1 - delayMix * 0.45 : 1;
+
   const cutGain = context.createGain();
   cutGain.gain.value = 1;
   timelineEvents.filter((event) => event.type === "cut" && event.time + event.duration >= schedule.cursor).forEach((event) => {
@@ -678,8 +642,95 @@ function connectProcessingGraph(context, sourceNode, segment, envelope, output, 
     cutGain.gain.setValueAtTime(Math.max(0.0001, 1 - depth), Math.max(start + 0.012, end - 0.018));
     cutGain.gain.linearRampToValueAtTime(1, end);
   });
-  envelope.connect(cutGain);
+  dry.connect(cutGain);
   cutGain.connect(output);
+
+  if (hasEchoReturn) {
+    const wet = context.createGain();
+    const delay = context.createDelay(2);
+    const feedback = context.createGain();
+    wet.gain.value = delayMix;
+    delay.delayTime.value = (Number(fx.delayMs) || 0) > 0
+      ? clamp(Number(fx.delayMs) / 1000, 0.04, 2)
+      : clamp(beatSeconds(segment) * 0.75, 0.12, 0.75);
+    feedback.gain.value = delayMix > 0 ? 0.22 : 0.001;
+    processed.connect(dry);
+    processed.connect(delay);
+    delay.connect(wet);
+    wet.connect(output);
+    delay.connect(feedback);
+    feedback.connect(delay);
+
+    echoEvents.forEach((event) => {
+      const params = { ...defaultEventParams(event.type), ...(event.params || {}) };
+      const start = scheduledTime(Math.max(event.time, schedule.cursor));
+      const end = scheduledTime(event.time + Math.max(0.2, event.duration));
+      const wetTarget = clamp(Number(params.mix ?? event.amount), 0, 1);
+      const feedbackTarget = clamp(Number(params.feedback) || 0.38, 0, 0.82);
+      const delayTarget = clamp(beatSeconds(segment) * (Number(params.delayBeats) || 1), 0.04, 1.8);
+      const tailEnd = end + clamp(beatSeconds(segment) * 3, 0.45, 1.5);
+      const dryTarget = event.type === "echo" ? clamp(Number(params.dryLevel ?? 0.16), 0.05, 1) : 1;
+      delay.delayTime.setValueAtTime(delayTarget, start);
+      feedback.gain.setValueAtTime(feedbackTarget, start);
+      wet.gain.setValueAtTime(0.001, start);
+      wet.gain.linearRampToValueAtTime(Math.max(0.001, wetTarget), Math.min(end, start + 0.08));
+      if (event.type === "echo") {
+        dry.gain.setValueAtTime(1, start);
+        dry.gain.linearRampToValueAtTime(dryTarget, end);
+      }
+      wet.gain.setValueAtTime(Math.max(0.001, wetTarget), end);
+      wet.gain.exponentialRampToValueAtTime(0.001, Math.max(end + 0.08, tailEnd));
+      feedback.gain.setValueAtTime(feedbackTarget, end);
+      feedback.gain.linearRampToValueAtTime(0.001, Math.max(end + 0.08, tailEnd));
+    });
+  } else {
+    processed.connect(dry);
+  }
+
+  loopEvents.forEach((event) => {
+    const params = { ...defaultEventParams("loop"), ...(event.params || {}) };
+    const start = scheduledTime(Math.max(event.time, schedule.cursor));
+    const end = scheduledTime(event.time + Math.max(0.4, event.duration));
+    const span = Math.max(0.2, end - start);
+    const firstBeats = clamp(Number(params.startBeats) || 0.5, 0.0625, 1);
+    const lastBeats = clamp(Number(params.endBeats) || 0.0625, 0.03125, firstBeats);
+    const mix = clamp(Number(params.mix ?? event.amount), 0.1, 0.84);
+    const feedbackLevel = clamp(Number(params.feedback) || 0.62, 0.2, 0.8);
+    const dryTarget = clamp(Number(params.dryLevel ?? 0.1), 0.04, 1);
+    const divisions = [...new Set([firstBeats, firstBeats / 2, firstBeats / 4, lastBeats].map((value) => roundMillis(Math.max(lastBeats, value))))];
+    const tailDuration = clamp(beatSeconds(segment) * 2, 0.45, 1.2);
+
+    dry.gain.setValueAtTime(1, start);
+    dry.gain.linearRampToValueAtTime(dryTarget, end);
+    divisions.forEach((division, index) => {
+      const stageStart = start + span * (index / divisions.length);
+      const stageEnd = start + span * ((index + 1) / divisions.length);
+      const delay = context.createDelay(2);
+      const send = context.createGain();
+      const wet = context.createGain();
+      const feedback = context.createGain();
+      const fade = Math.min(0.035, Math.max(0.01, (stageEnd - stageStart) / 4));
+      delay.delayTime.value = clamp(beatSeconds(segment) * division, 0.025, 0.8);
+      send.gain.setValueAtTime(0.001, schedule.origin);
+      wet.gain.setValueAtTime(0.001, schedule.origin);
+      feedback.gain.setValueAtTime(0.001, schedule.origin);
+      feedback.gain.linearRampToValueAtTime(feedbackLevel, Math.min(stageEnd, stageStart + fade));
+      send.gain.linearRampToValueAtTime(1, Math.min(stageEnd, stageStart + fade));
+      send.gain.linearRampToValueAtTime(0.001, stageEnd);
+      wet.gain.setValueAtTime(0.001, stageStart);
+      wet.gain.linearRampToValueAtTime(mix, Math.min(stageEnd, stageStart + fade));
+      wet.gain.setValueAtTime(mix, stageEnd);
+      wet.gain.exponentialRampToValueAtTime(0.001, Math.max(stageEnd + 0.06, stageEnd + tailDuration));
+      feedback.gain.setValueAtTime(feedbackLevel, stageEnd);
+      feedback.gain.linearRampToValueAtTime(0.001, Math.max(stageEnd + 0.08, stageEnd + tailDuration));
+      processed.connect(send);
+      send.connect(delay);
+      delay.connect(wet);
+      wet.connect(output);
+      delay.connect(feedback);
+      feedback.connect(delay);
+    });
+  });
 }
 
 function stopLivePreview(restoreMaster = false) {
@@ -793,28 +844,47 @@ function peaksFromBuffer(buffer, count = 720) {
 
 function estimateBpm(buffer) {
   const channel = buffer.getChannelData(0);
-  const hop = 2048;
-  const sampleLimit = Math.min(channel.length, Math.floor(buffer.sampleRate * 90));
+  const hop = 1024;
+  const windowSize = 2048;
+  const sampleLimit = Math.min(channel.length, Math.floor(buffer.sampleRate * 120));
   const energy = [];
   for (let start = 0; start < sampleLimit; start += hop) {
     let sum = 0;
-    const end = Math.min(sampleLimit, start + hop);
-    for (let sample = start; sample < end; sample += 1) sum += channel[sample] * channel[sample];
-    energy.push(Math.sqrt(sum / Math.max(1, end - start)));
+    const end = Math.min(sampleLimit, start + windowSize);
+    let count = 0;
+    for (let sample = start; sample < end; sample += 4) {
+      sum += channel[sample] * channel[sample];
+      count += 1;
+    }
+    energy.push(Math.sqrt(sum / Math.max(1, count)));
   }
   const onset = energy.map((value, index) => Math.max(0, value - (energy[index - 1] || value)));
   let bestBpm = 120;
   let bestScore = -1;
-  for (let bpm = 70; bpm <= 180; bpm += 1) {
-    const lag = Math.max(1, Math.round((60 * buffer.sampleRate) / (bpm * hop)));
-    let score = 0;
-    for (let index = lag; index < onset.length; index += 1) score += onset[index] * onset[index - lag];
+  const scores = [];
+  for (let bpm = 70; bpm <= 180; bpm += 0.25) {
+    const exactLag = (60 * buffer.sampleRate) / (bpm * hop);
+    const wholeLag = Math.floor(exactLag);
+    const fraction = exactLag - wholeLag;
+    let product = 0;
+    let currentEnergy = 0;
+    let delayedEnergy = 0;
+    for (let index = wholeLag + 1; index < onset.length; index += 1) {
+      const delayed = onset[index - wholeLag] * (1 - fraction) + onset[index - wholeLag - 1] * fraction;
+      product += onset[index] * delayed;
+      currentEnergy += onset[index] * onset[index];
+      delayedEnergy += delayed * delayed;
+    }
+    const score = product / Math.sqrt(Math.max(1e-12, currentEnergy * delayedEnergy));
+    scores.push({ bpm, score });
     if (score > bestScore) {
       bestScore = score;
       bestBpm = bpm;
     }
   }
-  return bestBpm;
+  const halfTempo = scores.find((candidate) => Math.abs(candidate.bpm - bestBpm / 2) < 0.13);
+  if (bestBpm >= 140 && halfTempo && halfTempo.score >= bestScore * 0.97) bestBpm = halfTempo.bpm;
+  return Math.round(bestBpm * 10) / 10;
 }
 
 function estimateBeatOffset(buffer, bpm) {
@@ -1096,7 +1166,7 @@ function analyzeAudioStructure(buffer) {
   const bestStart = clamp(bestFrame.start - 6, Math.min(buffer.duration, introEnd), Math.max(0, buffer.duration - 12));
   const sections = describeMusicalSections(frames, buffer.duration, introEnd, scenes, chorusRanges, activeMedian);
   return {
-    version: 1,
+    version: 2,
     rmsDb: roundTime(rmsDb),
     silenceThreshold: roundTime(silenceThreshold),
     silences: silences.slice(0, 12),
@@ -1207,7 +1277,7 @@ function toggleAllLibrarySources() {
 }
 
 function sourceBeatSeconds(source) {
-  return 60 / normalizedDjBpm(source.bpm);
+  return 60 / clamp(Number(source?.bpm) || 120, 50, 220);
 }
 
 function snapSourceToBeat(source, time, direction = "nearest") {
@@ -1216,6 +1286,14 @@ function snapSourceToBeat(source, time, direction = "nearest") {
   const position = (time - anchor) / beat;
   const beatIndex = direction === "before" ? Math.floor(position) : direction === "after" ? Math.ceil(position) : Math.round(position);
   return roundMillis(clamp(anchor + beatIndex * beat, 0, source.duration));
+}
+
+function snapSourceToBar(source, time, direction = "nearest") {
+  const bar = sourceBeatSeconds(source) * 4;
+  const anchor = Number.isFinite(source.beatOffset) ? source.beatOffset : 0;
+  const position = (time - anchor) / bar;
+  const barIndex = direction === "before" ? Math.floor(position) : direction === "after" ? Math.ceil(position) : Math.round(position);
+  return roundMillis(clamp(anchor + barIndex * bar, 0, source.duration));
 }
 
 function phraseDurationFor(source, targetSeconds, maximumSeconds = source.duration, preferredBars = "auto") {
@@ -1245,10 +1323,10 @@ function activeOpeningTime(source) {
 }
 
 function makePhrase(source, label, candidateStart, targetDuration, intensity = 0.7, preferredBars = "auto") {
-  const start = snapSourceToBeat(source, clamp(candidateStart, 0, source.duration - 0.5), "before");
+  const start = snapSourceToBar(source, clamp(candidateStart, 0, source.duration - 0.5), "before");
   const available = Math.max(0.5, source.duration - start);
   const phrase = phraseDurationFor(source, targetDuration, available, preferredBars);
-  const end = snapSourceToBeat(source, Math.min(source.duration, start + phrase.seconds), "after");
+  const end = snapSourceToBar(source, Math.min(source.duration, start + phrase.seconds), "after");
   return {
     label,
     start: roundTime(start),
@@ -1292,13 +1370,18 @@ function djTempoCompatibility(previousSource, nextSource) {
   const previous = normalizedDjBpm(previousSource?.bpm);
   const next = normalizedDjBpm(nextSource?.bpm);
   const difference = Math.abs(previous - next) / Math.max(previous, next);
-  return { compatible: difference <= 0.055, difference, previous, next };
+  const canSync = Math.abs(previous / next - 1) <= autoMixSettings.maxTempoShift;
+  return { compatible: canSync, difference, previous, next };
 }
 
 function automaticTransitionMode(tempoMatch, transitionIndex = 0) {
-  if (autoMixSettings.transitionStyle === "show") return ["loop", "blend", "impact", "filter"][transitionIndex % 4];
-  if (autoMixSettings.transitionStyle === "impact") return transitionIndex % 2 ? "loop" : "impact";
-  if (autoMixSettings.transitionStyle === "blend") return tempoMatch.difference <= 0.11 ? "blend" : "filter";
+  const style = autoMixSettings.transitionStyle;
+  if (style === "show") {
+    if (tempoMatch.compatible) return transitionIndex % 3 === 2 ? "loop" : "blend";
+    return transitionIndex % 3 === 2 ? "filter" : "impact";
+  }
+  if (style === "impact") return transitionIndex % 3 === 1 ? "loop" : "impact";
+  if (style === "blend") return tempoMatch.compatible ? "blend" : "impact";
   return tempoMatch.compatible ? "blend" : "impact";
 }
 
@@ -1309,10 +1392,11 @@ function tempoSyncDecision(previousSource, source) {
   const normalizedSourceBpm = normalizedDjBpm(originalBpm);
   const rate = targetBpm / normalizedSourceBpm;
   const safe = Math.abs(rate - 1) <= autoMixSettings.maxTempoShift;
+  const playbackRate = safe ? clamp(rate, 1 - autoMixSettings.maxTempoShift, 1 + autoMixSettings.maxTempoShift) : 1;
   return {
-    rate: safe ? clamp(rate, 1 - autoMixSettings.maxTempoShift, 1 + autoMixSettings.maxTempoShift) : 1,
+    rate: playbackRate,
     originalBpm,
-    targetBpm: safe ? targetBpm : originalBpm,
+    targetBpm: safe ? originalBpm * playbackRate : originalBpm,
     synced: safe,
   };
 }
@@ -1320,10 +1404,10 @@ function tempoSyncDecision(previousSource, source) {
 function transitionLabel(mode, tempoSync) {
   const sync = tempoSync.synced ? ` · SYNC ${tempoSync.targetBpm.toFixed(1)} BPM` : "";
   const labels = {
-    blend: "Bass swap · mezcla de 4 tiempos",
-    impact: "Echo freeze + impact cut",
-    loop: "Loop roll acelerado",
-    filter: "Doble filtro + cut off",
+    blend: "Bass swap · cruce de frase",
+    impact: "Echo lift · entrega en downbeat",
+    loop: "Loop roll · entrega en frase",
+    filter: "Cutoff filtrado · cola de eco",
     clean: "Corte limpio al downbeat",
   };
   return `${labels[mode] || labels.clean}${sync}`;
@@ -1332,11 +1416,11 @@ function transitionLabel(mode, tempoSync) {
 async function analyzeSelectedSources(keys) {
   const results = await Promise.allSettled(keys.map(async (key) => {
     const source = data.library[key];
-    if (!source.analysis?.sections?.length || !Number.isFinite(source.beatOffset)) {
+    if (source.analysis?.version !== 2 || !source.analysis?.sections?.length || !Number.isFinite(source.beatOffset)) {
       const buffer = await loadPreviewBuffer(source);
-      source.bpm = source.bpm || estimateBpm(buffer);
+      source.bpm = source.bpmLocked && Number.isFinite(source.bpm) ? source.bpm : estimateBpm(buffer);
       source.beatOffset = estimateBeatOffset(buffer, source.bpm);
-      if (!source.analysis?.sections?.length) source.analysis = analyzeAudioStructure(buffer);
+      source.analysis = { ...analyzeAudioStructure(buffer), bpm: source.bpm };
     }
   }));
   return results.filter((result) => result.status === "rejected").length;
@@ -1369,7 +1453,7 @@ async function createAutomaticMix() {
     waveform: Array.from({ length: 240 }, () => 0.025),
     segments: [],
     events: [],
-    changes: ["Arreglo construido por frases completas", "Tempo sincronizado solo dentro del margen seguro", "Bass swap, loop roll, echo freeze, filtros y cuts rotativos"],
+    changes: ["Arreglo construido con entradas y salidas al inicio del compás", "Tempo sincronizado solo dentro del margen seguro", "Cruces de frase con filtro, loop roll y colas de eco sin cortes secos"],
     autoMixSettings: { ...autoMixSettings },
     custom: true,
   };
@@ -1380,14 +1464,18 @@ async function createAutomaticMix() {
     const source = data.library[key];
     const estimatedGain = source.analysis ? clamp(-16 - source.analysis.rmsDb, -5, 6) : 0;
     const remainingSongs = Math.max(1, keys.length - index);
-    const adaptiveDuration = Math.max(8, (duration - cursor) / remainingSongs);
-    const plan = buildRadioEditPlan(source, Math.max(requestedDuration * 0.75, adaptiveDuration), index === 0, autoMixSettings.phraseBars);
     const tempoMatch = previousSource ? djTempoCompatibility(previousSource, source) : null;
     const tempoSync = tempoSyncDecision(previousSource, source);
     const transitionMode = tempoMatch ? automaticTransitionMode(tempoMatch, index - 1) : "clean";
-    const transitionOverlap = transitionMode === "blend"
-      ? clamp(Math.min(sourceBeatSeconds(previousSource) * 4, sourceBeatSeconds(source) * 4), 1.2, 2.8)
-      : previousSource ? transitionMode === "loop" ? 0.12 : 0.06 : 0;
+    const outgoingBeat = previousSongLast ? 60 / clamp(Number(previousSongLast.bpm) || 120, 50, 220) : 0;
+    const incomingBeat = sourceBeatSeconds(source) / tempoSync.rate;
+    const transitionOverlap = !tempoMatch
+      ? 0
+      : transitionMode === "blend"
+        ? clamp(Math.min(outgoingBeat * 8, incomingBeat * 8), 2.6, 5.2)
+          : clamp(Math.min(outgoingBeat * 4, incomingBeat * 4), 1.2, 3.1);
+    const timelineShare = Math.max(8, (duration - cursor) / remainingSongs);
+    const plan = buildRadioEditPlan(source, Math.min(source.duration, timelineShare + transitionOverlap), index === 0, autoMixSettings.phraseBars);
     const songStart = roundTime(Math.max(0, cursor - transitionOverlap));
     let songCursor = songStart;
     let firstSongSegment = null;
@@ -1417,11 +1505,11 @@ async function createAutomaticMix() {
         sectionIntensity: section.intensity,
         color: colorForSection(section.label, colorForSegment({ sourceKey: key })),
         songGroupId: `radio-song-${index + 1}`,
-        fadeIn: sectionIndex ? 0.025 : index ? transitionOverlap : 0.025,
+        fadeIn: sectionIndex ? 0.025 : index && transitionOverlap ? transitionOverlap : 0.025,
         fadeOut: 0.04,
         fadeCurve: "equal-power",
         gainDb: roundTime(estimatedGain),
-        bpm: tempoSync.targetBpm,
+        bpm: roundTime(Number(source.bpm || 120) * tempoSync.rate),
         originalBpm: tempoSync.originalBpm,
         playbackRate: tempoSync.rate,
         tempoSynced: tempoSync.synced,
@@ -1432,7 +1520,7 @@ async function createAutomaticMix() {
     });
     const lastSongSegment = session.segments.at(-1);
     if (previousSongLast && firstSongSegment) {
-      previousSongLast.fadeOut = transitionMode === "blend" ? transitionOverlap : 0.04;
+      previousSongLast.fadeOut = transitionOverlap > 0 ? transitionOverlap : 0.04;
       const fxEnergy = clamp(autoMixSettings.fxIntensity, 0, 1);
       if (transitionMode === "blend") {
         const highpassOut = 90 + fxEnergy * 170;
@@ -1459,7 +1547,7 @@ async function createAutomaticMix() {
           params: { role: "in", startHighpass: highpassIn, endHighpass: 20, startLowpass: 9000 + fxEnergy * 1000, endLowpass: 20000 },
         });
       } else if (transitionMode === "impact") {
-        const echoDuration = clamp(sourceBeatSeconds(previousSource) * 2, 0.55, 1.25);
+        const echoDuration = clamp(outgoingBeat * 2, 0.55, 1.4);
         session.events.push({
           id: `event-auto-${Date.now()}-${index}`,
           type: "echo",
@@ -1468,7 +1556,7 @@ async function createAutomaticMix() {
           duration: echoDuration,
           amount: fxEnergy,
           trackId: previousSongLast.id,
-          params: { ...defaultEventParams("echo"), delayBeats: 0.5, mix: 0.22 + fxEnergy * 0.32, feedback: 0.18 + fxEnergy * 0.22 },
+          params: { ...defaultEventParams("echo"), delayBeats: 0.5, mix: 0.24 + fxEnergy * 0.24, feedback: 0.2 + fxEnergy * 0.2, dryLevel: 0.14 },
         });
         session.events.push({
           id: `event-auto-filter-${Date.now()}-${index}`,
@@ -1478,20 +1566,20 @@ async function createAutomaticMix() {
           duration: echoDuration,
           amount: fxEnergy,
           trackId: previousSongLast.id,
-          params: { filterMode: "highpass", startHz: 20, endHz: 900 + fxEnergy * 2300, resonance: 0.8 + fxEnergy * 0.8 },
+          params: { filterMode: "highpass", startHz: 20, endHz: 900 + fxEnergy * 1500, resonance: 0.75 + fxEnergy * 0.55 },
         });
         session.events.push({
-          id: `event-auto-cut-${Date.now()}-${index}`,
-          type: "cut",
-          label: "Impact cut",
-          time: roundTime(Math.max(previousSongLast.start, previousSongLast.end - 0.16)),
-          duration: 0.16,
-          amount: Math.max(0.75, fxEnergy),
-          trackId: previousSongLast.id,
-          params: { depth: 1 },
+          id: `event-auto-entry-filter-${Date.now()}-${index}`,
+          type: "filter",
+          label: "Apertura de graves al downbeat",
+          time: firstSongSegment.start,
+          duration: transitionOverlap,
+          amount: fxEnergy,
+          trackId: firstSongSegment.id,
+          params: { filterMode: "highpass", startHz: 180, endHz: 24, resonance: 0.72 },
         });
       } else if (transitionMode === "loop") {
-        const loopDuration = clamp(sourceBeatSeconds(previousSource) * 3, 1.1, 2.4);
+        const loopDuration = clamp(outgoingBeat * 3, 1.1, 2.4);
         session.events.push({
           id: `event-auto-loop-${Date.now()}-${index}`,
           type: "loop",
@@ -1500,7 +1588,7 @@ async function createAutomaticMix() {
           duration: loopDuration,
           amount: fxEnergy,
           trackId: previousSongLast.id,
-          params: { startBeats: 0.5, endBeats: 0.0625, feedback: 0.55 + fxEnergy * 0.3, mix: 0.48 + fxEnergy * 0.42 },
+          params: { startBeats: 0.5, endBeats: 0.0625, feedback: 0.5 + fxEnergy * 0.24, mix: 0.48 + fxEnergy * 0.3, dryLevel: 0.1 },
         });
         session.events.push({
           id: `event-auto-loop-filter-${Date.now()}-${index}`,
@@ -1512,8 +1600,18 @@ async function createAutomaticMix() {
           trackId: previousSongLast.id,
           params: { filterMode: "highpass", startHz: 28, endHz: 1800 + fxEnergy * 3200, resonance: 1.1 + fxEnergy },
         });
+        session.events.push({
+          id: `event-auto-loop-entry-${Date.now()}-${index}`,
+          type: "filter",
+          label: "Apertura de graves al downbeat",
+          time: firstSongSegment.start,
+          duration: transitionOverlap,
+          amount: fxEnergy,
+          trackId: firstSongSegment.id,
+          params: { filterMode: "highpass", startHz: 160, endHz: 24, resonance: 0.7 },
+        });
       } else if (transitionMode === "filter") {
-        const sweepDuration = clamp(sourceBeatSeconds(previousSource) * 2, 0.7, 1.5);
+        const sweepDuration = clamp(outgoingBeat * 2, 0.7, 1.6);
         session.events.push({
           id: `event-auto-lpf-${Date.now()}-${index}`,
           type: "filter",
@@ -1522,17 +1620,27 @@ async function createAutomaticMix() {
           duration: sweepDuration,
           amount: fxEnergy,
           trackId: previousSongLast.id,
-          params: { filterMode: "lowpass", startHz: 19000, endHz: 180 + fxEnergy * 180, resonance: 1.4 + fxEnergy * 1.5 },
+          params: { filterMode: "lowpass", startHz: 19000, endHz: 720 + fxEnergy * 420, resonance: 0.8 + fxEnergy * 0.55 },
         });
         session.events.push({
-          id: `event-auto-filter-cut-${Date.now()}-${index}`,
-          type: "cut",
-          label: "Cut off final",
-          time: roundTime(Math.max(previousSongLast.start, previousSongLast.end - 0.12)),
-          duration: 0.12,
-          amount: 1,
+          id: `event-auto-filter-echo-${Date.now()}-${index}`,
+          type: "echo",
+          label: "Cola filtrada de salida",
+          time: roundTime(Math.max(previousSongLast.start, previousSongLast.end - sweepDuration)),
+          duration: sweepDuration,
+          amount: fxEnergy,
           trackId: previousSongLast.id,
-          params: { depth: 1 },
+          params: { ...defaultEventParams("echo"), delayBeats: 0.5, mix: 0.22 + fxEnergy * 0.18, feedback: 0.18 + fxEnergy * 0.2, dryLevel: 0.18 },
+        });
+        session.events.push({
+          id: `event-auto-filter-entry-${Date.now()}-${index}`,
+          type: "filter",
+          label: "Apertura de graves al downbeat",
+          time: firstSongSegment.start,
+          duration: transitionOverlap,
+          amount: fxEnergy,
+          trackId: firstSongSegment.id,
+          params: { filterMode: "highpass", startHz: 150, endHz: 24, resonance: 0.7 },
         });
       }
     }
@@ -1543,15 +1651,27 @@ async function createAutomaticMix() {
   const lastSegment = session.segments.at(-1);
   if (lastSegment) {
     session.duration = Math.max(30, lastSegment.end);
+    const outroDuration = clamp((60 / clamp(Number(lastSegment.bpm) || 120, 50, 220)) * 4, 1.2, 2.4);
+    lastSegment.fadeOut = outroDuration;
     session.events.push({
       id: `event-auto-end-${Date.now()}`,
       type: "filter",
       label: "Cierre musical",
-      time: roundTime(Math.max(lastSegment.start, lastSegment.end - 0.9)),
-      duration: 0.9,
+      time: roundTime(Math.max(lastSegment.start, lastSegment.end - outroDuration)),
+      duration: outroDuration,
       amount: 0.4,
       trackId: lastSegment.id,
-      params: { ...defaultEventParams("filter"), filterMode: "lowpass", startHz: 18000, endHz: 2200 },
+      params: { ...defaultEventParams("filter"), filterMode: "lowpass", startHz: 18000, endHz: 1200 },
+    });
+    session.events.push({
+      id: `event-auto-end-echo-${Date.now()}`,
+      type: "echo",
+      label: "Cola final",
+      time: roundTime(Math.max(lastSegment.start, lastSegment.end - outroDuration)),
+      duration: outroDuration,
+      amount: 0.36,
+      trackId: lastSegment.id,
+      params: { ...defaultEventParams("echo"), delayBeats: 0.5, mix: 0.22, feedback: 0.24, dryLevel: 0.16 },
     });
   }
   applySessionDefaults(session);
