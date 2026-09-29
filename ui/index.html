@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0b0d0e" />
     <title>Mix Shary · Sala de edición</title>
-    <link rel="stylesheet" href="./styles.css?v=20260929-9" />
+    <link rel="stylesheet" href="./styles.css?v=20260929-10" />
   </head>
   <body>
     <div class="app-shell">
@@ -39,19 +39,22 @@
             Subir canciones
           </button>
           <div class="library-batch" aria-label="Creación automática de mix">
-            <button id="select-all-sources" type="button" aria-pressed="false">Seleccionar todas</button>
-            <button id="auto-mix-button" type="button" disabled>
-              <span>Crear mezcla DJ</span><small id="auto-mix-count">Elige canciones</small>
-            </button>
-            <div class="smart-dj-mode">
-              <strong><i></i> SMART DJ</strong>
-              <span>Frases completas · 8/16 compases · máximo 2 cortes por canción</span>
+            <div class="director-head">
+              <span class="director-orbit" aria-hidden="true"><i></i></span>
+              <div><strong>SMART DJ DIRECTOR</strong><span>Construye el arreglo, sincroniza y diseña cada transición.</span></div>
             </div>
             <div class="smart-dj-controls" aria-label="Control del mix automático">
-              <div class="smart-control-row"><span>TRANSICIÓN</span><div class="smart-choice" id="auto-transition-style"><button type="button" data-value="smart" aria-pressed="true">Smart</button><button type="button" data-value="blend">Club</button><button type="button" data-value="impact">Impacto</button><button type="button" data-value="clean">Limpia</button></div></div>
+              <div class="smart-control-row director-profile"><span>CARÁCTER</span><div class="smart-choice" id="auto-transition-style"><button type="button" data-value="smart" aria-pressed="true">Elegante</button><button type="button" data-value="blend">Club</button><button type="button" data-value="impact">Agresivo</button><button type="button" data-value="show">Show</button></div></div>
               <div class="smart-control-row"><span>FRASES</span><div class="smart-choice" id="auto-phrase-size"><button type="button" data-value="auto" aria-pressed="true">Auto</button><button type="button" data-value="8">8</button><button type="button" data-value="16">16</button></div></div>
+              <button id="auto-tempo-sync" class="tempo-sync" type="button" aria-pressed="true"><span>SYNC TEMPO</span><strong>Seguro ±8%</strong><i></i></button>
               <label class="smart-intensity"><span>ENERGÍA FX</span><input id="auto-fx-intensity" type="range" min="0" max="1" value="0.72" step="0.01"><output id="auto-fx-intensity-value">72%</output></label>
+              <div class="director-fx-line" aria-label="Efectos automáticos"><span>BASS SWAP</span><span>LOOP ROLL</span><span>ECHO FREEZE</span><span>HPF / LPF</span><span>IMPACT CUT</span></div>
             </div>
+            <button id="select-all-sources" type="button" aria-pressed="false">Seleccionar todas</button>
+            <button id="auto-mix-button" type="button" disabled>
+              <span>COCINAR MIX</span><small id="auto-mix-count">Elige canciones</small>
+            </button>
+            <div id="director-status" class="director-status"><i></i><span>Listo para analizar estructura, BPM y energía.</span></div>
           </div>
           <div id="library-list" class="library-list"></div>
         </section>
@@ -89,6 +92,10 @@
             <button id="export-wav-button" class="download" type="button">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg>
               Exportar WAV 24-bit
+            </button>
+            <button id="export-mp3-button" class="download mp3-download" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg>
+              MP3 320
             </button>
             <a id="download-link" class="master-download" download>MP3 actual</a>
           </div>
@@ -195,6 +202,8 @@
               <button type="button" data-add-event="cue" title="Atajo C">CUE</button>
               <button type="button" data-add-event="echo" title="Echo out">ECHO</button>
               <button type="button" data-add-event="filter" title="Barrido de filtro">FILTER</button>
+              <button type="button" data-add-event="loop" title="Loop roll acelerado">LOOP</button>
+              <button type="button" data-add-event="cut" title="Cut de impacto">CUT</button>
               <button type="button" data-add-event="dip" title="Golpe de silencio">DIP</button>
             </div>
           </div>
@@ -353,7 +362,7 @@
         <div id="clip-inspector" class="clip-inspector"></div>
         <section class="event-inspector" aria-label="Evento seleccionado">
           <div class="event-inspector-head"><span>Eventos del mix</span><small id="event-count">0</small></div>
-          <div id="event-editor" class="event-editor"><p>Agrega CUE, ECHO, FILTER o DIP en la posición del cursor.</p></div>
+          <div id="event-editor" class="event-editor"><p>Agrega CUE, ECHO, FILTER, LOOP, CUT o DIP en la posición del cursor.</p></div>
         </section>
         <div class="draft-actions">
           <button id="save-exact-button" class="save-exact-action" type="button">Guardar estado exacto</button>
@@ -385,6 +394,7 @@
       <div><strong id="render-title">Creando master de alta calidad</strong><span id="render-status">Preparando fuentes a 48 kHz / 24-bit…</span></div>
     </div>
     <script src="./data.js?v=20260927-3"></script>
-    <script src="./app.js?v=20260929-17"></script>
+    <script src="./vendor/lame.min.js?v=1.2.1"></script>
+    <script src="./app.js?v=20260929-18"></script>
   </body>
 </html>
