@@ -147,7 +147,6 @@
                 <option value="phrase">8 tiempos</option>
               </select>
             </label>
-            <button id="split-button" class="tool-button" type="button" title="Atajo: S">Cortar en cursor</button>
             <button id="align-button" class="tool-button" type="button">Encajar con anterior</button>
             <button id="smart-transition-button" class="tool-button smart-transition" type="button" title="Detecta el golpe, alinea la frase y reproduce el empalme">Empalme inteligente</button>
             <button id="audition-button" class="tool-button" type="button">Oír transición</button>
@@ -297,6 +296,38 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
             </button>
           </nav>
+
+          <div class="quick-edit-bar" aria-label="Edición rápida de la pista seleccionada">
+            <div class="quick-edit-context"><span>EDICIÓN RÁPIDA</span><strong id="quick-edit-track">Selecciona una pista</strong></div>
+            <div class="quick-edit-actions">
+              <button id="split-button" type="button" title="Dividir pista en el cursor · S">Cortar</button>
+              <button id="quick-trim-in" type="button" title="Recortar desde el inicio hasta el cursor">Inicio aquí</button>
+              <button id="quick-trim-out" type="button" title="Recortar desde el cursor hasta el final">Final aquí</button>
+              <label>Fade in <input id="quick-fade-in" type="number" min="0" max="8" step="0.05" value="0" aria-label="Fade in en segundos"></label>
+              <label>Fade out <input id="quick-fade-out" type="number" min="0" max="8" step="0.05" value="0" aria-label="Fade out en segundos"></label>
+              <label class="quick-fx-label">FX <select id="quick-fx-type" aria-label="Efecto rápido para la pista"><option value="echo">Echo</option><option value="filter">Filtro</option><option value="loop">Loop</option><option value="cut">Cut</option><option value="dip">Dip</option></select></label>
+              <button id="quick-add-fx" type="button" title="Insertar el efecto seleccionado en el cursor, solo en esta pista">+ En cursor</button>
+            </div>
+            <button id="ending-composer-toggle" class="quick-ending-button" type="button" aria-expanded="false" aria-controls="ending-composer">Crear final <span>↗</span></button>
+            <section id="ending-composer" class="ending-composer" aria-label="Constructor de final del mix" hidden>
+              <header><div><span>DIRECTOR DE FINALES</span><strong>Un cierre que se sienta terminado</strong></div><button id="ending-close" type="button" aria-label="Cerrar constructor de final">×</button></header>
+              <p id="ending-target">Elige un cierre para la última pista del mix.</p>
+              <div class="ending-modes" role="group" aria-label="Tipo de final">
+                <button type="button" data-ending-mode="cut" class="active" aria-pressed="true">Corte seco<small>Golpe y silencio</small></button>
+                <button type="button" data-ending-mode="echo" aria-pressed="false">Echo out<small>Repetición amplia</small></button>
+                <button type="button" data-ending-mode="delay" aria-pressed="false">Delay<small>Rebote rítmico</small></button>
+                <button type="button" data-ending-mode="loop" aria-pressed="false">Loop roll<small>Sube la energía</small></button>
+              </div>
+              <div class="ending-controls">
+                <label>Preparación<select id="ending-beats"><option value="2">2 tiempos</option><option value="4" selected>4 tiempos</option><option value="8">8 tiempos</option></select></label>
+                <label>Filtro<select id="ending-filter"><option value="none">Sin filtro</option><option value="lowpass">Pasa bajo</option><option value="highpass">Pasa alto</option></select></label>
+                <label>Rebote<select id="ending-division"><option value="0.5">1/8</option><option value="1" selected>1/4</option><option value="2">1/2</option></select></label>
+                <label>Cola<select id="ending-tail"><option value="0.5">Corta · 0,5 s</option><option value="1.5" selected>Media · 1,5 s</option><option value="3">Larga · 3 s</option></select></label>
+              </div>
+              <p id="ending-preview" class="ending-preview">Corte sobre el último golpe · sin cola.</p>
+              <footer><button id="ending-audition" type="button">▶ Escuchar</button><button id="ending-remove" type="button" hidden>Quitar final</button><button id="ending-apply" class="ending-apply" type="button">Aplicar final</button></footer>
+            </section>
+          </div>
 
           <div class="timeline-grid">
             <div class="timeline-label waveform-label"><span>MEZCLA</span><small>Estéreo</small></div>

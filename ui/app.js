@@ -69,6 +69,7 @@ const automationEvents = document.querySelector("#automation-events");
 const eventEditor = document.querySelector("#event-editor");
 const zoomXInput = document.querySelector("#zoom-x");
 const zoomYInput = document.querySelector("#zoom-y");
+const endingComposer = document.querySelector("#ending-composer");
 const DRAFT_KEY = IS_PUBLIC_HOST ? "mix-shary-online-clean-edits-v1" : "mix-shary-edits-v3";
 const LEGACY_DRAFT_KEY = IS_PUBLIC_HOST ? "mix-shary-online-clean-edits-v0" : "mix-shary-edits-v2";
 const WORKSPACE_STATE_KEY = IS_PUBLIC_HOST ? "mix-shary-online-clean-workspace-state-v1" : "mix-shary-workspace-state-v1";
@@ -155,6 +156,8 @@ let autoMixCooking = false;
 let pendingSessionDeleteId = null;
 let pendingSessionDeleteTimer = 0;
 let historyApplying = false;
+let endingPreviewSnapshot = null;
+let endingMode = "cut";
 const autoMixSettings = { transitionStyle: "smart", phraseBars: "auto", fxIntensity: 0.72, tempoSync: true, maxTempoShift: 0.08 };
 
 const state = {
@@ -384,6 +387,7 @@ function ensureAudioContext() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     livePreview.context = new AudioContextClass();
     livePreview.output = livePreview.context.createGain();
+    const endingGate = livePreview.context.createGain();
     const highpass = livePreview.context.createBiquadFilter();
     const lowpass = livePreview.context.createBiquadFilter();
     const dry = livePreview.context.createGain();
@@ -410,10 +414,11 @@ function ensureAudioContext() {
     wet.connect(masterGlue);
     delay.connect(feedback);
     feedback.connect(delay);
-    masterGlue.connect(analyser);
+    masterGlue.connect(endingGate);
+    endingGate.connect(analyser);
     analyser.connect(livePreview.context.destination);
     livePreview.analyser = analyser;
-    livePreview.fx = { highpass, lowpass, dry, wet, delay, feedback, masterGlue };
+    livePreview.fx = { highpass, lowpass, dry, wet, delay, feedback, masterGlue, endingGate };
     applyLiveFxValues(true);
   }
   livePreview.output.gain.value = Number(document.querySelector("#volume-slider").value) * 0.82;
@@ -751,6 +756,14 @@ async function startLivePreview() {
   stopLivePreview();
   const cursor = audio.currentTime;
   const now = context.currentTime + 0.035;
+  const endingGate = livePreview.fx.endingGate.gain;
+  endingGate.cancelScheduledValues(context.currentTime);
+  endingGate.setValueAtTime(1, context.currentTime);
+  if (getEndingMarker()) {
+    const finish = now + Math.max(0, currentSession().duration - cursor);
+    endingGate.setValueAtTime(1, Math.max(now, finish - 0.035));
+    endingGate.linearRampToValueAtTime(0, Math.max(now + 0.001, finish - 0.006));
+  }
   currentSession().segments.forEach((segment) => {
     const activeStart = Math.max(cursor, segment.start);
     if (activeStart >= segment.end) return;
@@ -2441,6 +2454,7 @@ function requestDeleteSession(sessionId) {
 
 function selectSession(id) {
   if (id === state.sessionId) return;
+  if (endingPreviewSnapshot) { audio.pause(); restoreEndingPreview(); }
   saveDraft();
   audio.pause();
   stopLivePreview(true);
@@ -2874,7 +2888,7 @@ function addTimelineEvent(type, options = {}) {
   const session = currentSession();
   const segment = options.segment || selectedSegment();
   const duration = Number.isFinite(options.duration) ? options.duration : definition.duration;
-  const time = options.atEnd && segment
+  const time = Number.isFinite(options.time) ? roundTime(options.time) : options.atEnd && segment
     ? roundTime(clamp(segment.end - Math.max(0.05, duration), segment.start, segment.end))
     : eventTimeFromCursor();
   const event = {
@@ -2910,6 +2924,211 @@ function addEndTrackEffect(preset) {
   if (!presetOptions) return;
   addTimelineEvent(presetOptions.type, { ...presetOptions, atEnd: true, segment });
   renderInspector();
+}
+
+function lastMixSegment() {
+  return currentSession().segments.reduce((last, segment) => !last || segment.end > last.end ? segment : last, null);
+}
+
+function getEndingMarker() {
+  return currentSession().events.find((event) => event.params?.endingMarker);
+}
+
+function endingConfiguration() {
+  return {
+    mode: endingMode,
+    beats: Number(document.querySelector("#ending-beats").value),
+    filter: document.querySelector("#ending-filter").value,
+    division: Number(document.querySelector("#ending-division").value),
+    tail: Number(document.querySelector("#ending-tail").value),
+  };
+}
+
+function renderQuickEditBar() {
+  const segment = selectedSegment();
+  document.querySelector("#quick-edit-track").textContent = segment ? segment.name : "Sin pista seleccionada";
+  document.querySelector("#quick-fade-in").value = segment ? segment.fadeIn.toFixed(2) : "0";
+  document.querySelector("#quick-fade-out").value = segment ? segment.fadeOut.toFixed(2) : "0";
+  document.querySelectorAll("#quick-trim-in, #quick-trim-out, #quick-fade-in, #quick-fade-out, #quick-add-fx, #split-button").forEach((control) => { control.disabled = !segment; });
+  const last = lastMixSegment();
+  const marker = getEndingMarker();
+  const stale = marker && (!last || marker.trackId !== last.id || Math.abs(marker.time - last.end) > 0.05);
+  document.querySelector("#ending-composer-toggle").disabled = !last;
+  document.querySelector("#ending-target").textContent = last
+    ? stale
+      ? `El final guardado quedó desfasado. Última pista actual: ${last.name} · ${formatTime(last.end)}. Vuelve a aplicar el final.`
+      : `Última pista: ${last.name} · termina en ${formatTime(last.end)}. Los efectos se aplican solo a ella; el master se cierra en silencio.`
+    : "Sube una canción para construir el final.";
+  document.querySelector("#ending-remove").hidden = !marker;
+  document.querySelector("#ending-apply").textContent = marker ? "Actualizar final" : "Aplicar final";
+  updateEndingPreview();
+}
+
+function updateEndingPreview() {
+  const last = lastMixSegment();
+  if (!last) return;
+  const config = endingConfiguration();
+  const tail = config.mode === "cut" ? 0 : config.tail;
+  const label = { cut: "Corte seco", echo: "Echo out", delay: "Delay rítmico", loop: "Loop roll" }[config.mode];
+  const filter = config.filter === "none" ? "sin filtro" : config.filter === "lowpass" ? "pasa bajo" : "pasa alto";
+  document.querySelector("#ending-preview").textContent = `${label} · ${config.beats} tiempos de preparación · ${filter} · ${tail ? `cola de ${tail.toFixed(1)} s` : "silencio inmediato"} · mix ${formatTime(last.end + tail)}.`;
+  document.querySelector("#ending-division").disabled = config.mode === "cut";
+  document.querySelector("#ending-tail").disabled = config.mode === "cut";
+}
+
+function openEndingComposer(open = true) {
+  endingComposer.hidden = !open;
+  document.querySelector("#ending-composer-toggle").setAttribute("aria-expanded", String(open));
+  if (!open) return;
+  const saved = getEndingMarker()?.params?.endingConfig;
+  if (saved) {
+    endingMode = saved.mode || "cut";
+    document.querySelector("#ending-beats").value = String(saved.beats || 4);
+    document.querySelector("#ending-filter").value = saved.filter || "none";
+    document.querySelector("#ending-division").value = String(saved.division || 1);
+    document.querySelector("#ending-tail").value = String(saved.tail || 1.5);
+  }
+  document.querySelectorAll("[data-ending-mode]").forEach((button) => {
+    const active = button.dataset.endingMode === endingMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  renderQuickEditBar();
+}
+
+function clearMixEnding({ persist = true } = {}) {
+  const session = currentSession();
+  const marker = getEndingMarker();
+  if (!marker) return false;
+  const original = marker.params || {};
+  const owner = session.segments.find((segment) => segment.id === marker.trackId);
+  if (owner && Number.isFinite(original.originalFadeOut)) owner.fadeOut = original.originalFadeOut;
+  session.events = session.events.filter((event) => !event.params?.endingBuilder);
+  const lastEnd = Math.max(0, ...session.segments.map((segment) => segment.end));
+  session.duration = Math.max(lastEnd, Number(original.originalDuration) || lastEnd);
+  if (state.selectedEventId && !session.events.some((event) => event.id === state.selectedEventId)) state.selectedEventId = null;
+  if (persist) {
+    audio.pause();
+    saveDraft();
+    renderWorkspace();
+    showToast("Final quitado · duración y fade anteriores restaurados");
+  }
+  return true;
+}
+
+function addEndingEvent(session, segment, type, time, duration, label, params = {}) {
+  const event = {
+    id: `ending-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    type, label, time: roundTime(time), duration: roundTime(duration), amount: 0.78,
+    trackId: segment.id,
+    params: { ...defaultEventParams(type), ...params, endingBuilder: true },
+  };
+  session.events.push(event);
+  return event;
+}
+
+function applyMixEnding(config = endingConfiguration(), { persist = true } = {}) {
+  const session = currentSession();
+  if (persist) audio.pause();
+  if (getEndingMarker()) clearMixEnding({ persist: false });
+  const segment = lastMixSegment();
+  if (!segment) { showToast("Agrega al menos una pista para crear un final"); return false; }
+  const originalDuration = session.duration;
+  const originalFadeOut = segment.fadeOut;
+  const prep = Math.min(segment.end - segment.start, beatSeconds(segment) * config.beats);
+  const start = Math.max(segment.start, segment.end - prep);
+  const duration = Math.max(0.12, segment.end - start);
+  const tail = config.mode === "cut" ? 0 : config.tail;
+  const marker = addEndingEvent(session, segment, "cue", segment.end, 0, "FINAL", {
+    endingMarker: true, endingConfig: { ...config }, originalDuration, originalFadeOut,
+  });
+  if (config.filter !== "none") addEndingEvent(session, segment, "filter", start, duration, config.filter === "lowpass" ? "Final LPF" : "Final HPF", {
+    filterMode: config.filter,
+    startHz: config.filter === "lowpass" ? 18000 : 20,
+    endHz: config.filter === "lowpass" ? 480 : 7200,
+    resonance: 0.8,
+  });
+  if (config.mode === "echo" || config.mode === "delay") {
+    addEndingEvent(session, segment, "echo", start, duration, config.mode === "echo" ? "Echo final" : "Delay final", {
+      delayBeats: config.mode === "echo" ? Math.max(0.5, config.division) : config.division,
+      mix: config.mode === "echo" ? 0.68 : 0.48,
+      feedback: config.mode === "echo" ? 0.48 : 0.34,
+      dryLevel: config.mode === "echo" ? 0.12 : 0.42,
+    });
+  } else if (config.mode === "loop") {
+    addEndingEvent(session, segment, "loop", start, duration, "Loop roll final", {
+      startBeats: Math.min(1, config.division), endBeats: 0.0625,
+      mix: 0.68, feedback: 0.55, dryLevel: 0.12,
+    });
+  }
+  segment.fadeOut = Math.min((segment.end - segment.start) / 2, config.mode === "cut" ? 0.035 : 0.1);
+  session.duration = roundTime(segment.end + tail);
+  state.selectedEventId = marker.id;
+  if (persist) {
+    saveDraft();
+    renderWorkspace();
+    showToast(`${marker.label}: ${segment.name} · mix ${formatTime(session.duration)}`);
+  }
+  return true;
+}
+
+function restoreEndingPreview() {
+  if (!endingPreviewSnapshot) return;
+  const snapshot = endingPreviewSnapshot;
+  endingPreviewSnapshot = null;
+  const session = currentSession();
+  if (session.id !== snapshot.sessionId) return;
+  session.duration = snapshot.duration;
+  session.events = snapshot.events;
+  session.segments.forEach((segment) => {
+    if (snapshot.fades.has(segment.id)) segment.fadeOut = snapshot.fades.get(segment.id);
+  });
+  state.selectedEventId = snapshot.selectedEventId;
+  state.auditionEnd = null;
+  renderWorkspace();
+  seekTo(snapshot.cursor);
+  saveWorkspaceView();
+}
+
+async function auditionMixEnding() {
+  if (endingPreviewSnapshot) restoreEndingPreview();
+  const session = currentSession();
+  const last = lastMixSegment();
+  if (!last) return;
+  if (!canLivePreview()) {
+    showToast("Para escuchar el final, carga las canciones originales y activa la edición Master");
+    return;
+  }
+  audio.pause();
+  endingPreviewSnapshot = {
+    sessionId: session.id, cursor: audio.currentTime, duration: session.duration, events: structuredClone(session.events),
+    fades: new Map(session.segments.map((segment) => [segment.id, segment.fadeOut])),
+    selectedEventId: state.selectedEventId,
+  };
+  if (!applyMixEnding(endingConfiguration(), { persist: false })) { endingPreviewSnapshot = null; return; }
+  renderWorkspace();
+  const prep = beatSeconds(last) * Number(document.querySelector("#ending-beats").value);
+  const from = Math.max(last.start, last.end - prep - 2);
+  state.auditionEnd = session.duration - 0.02;
+  seekTo(from);
+  const preview = endingPreviewSnapshot;
+  playButton.classList.add("loading");
+  try {
+    await prepareLivePreview();
+    if (endingPreviewSnapshot !== preview) return;
+    audio.muted = true;
+    await audio.play();
+    if (endingPreviewSnapshot !== preview) { audio.pause(); return; }
+    await startLivePreview();
+    showToast("Preescucha temporal · el final aún no se guardó");
+  } catch (error) {
+    console.warn("No se pudo escuchar el final", error);
+    audio.pause();
+    restoreEndingPreview();
+    showToast("No se pudo preparar la preescucha; revisa los archivos de audio");
+  } finally {
+    playButton.classList.remove("loading");
+  }
 }
 
 function selectedEvent() {
@@ -3006,6 +3225,7 @@ function renderEventEditor() {
     renderEventEditor();
   }));
   eventEditor.querySelector(".event-remove").addEventListener("click", () => {
+    if (event.params?.endingMarker) { clearMixEnding(); return; }
     currentSession().events = currentSession().events.filter((candidate) => candidate.id !== event.id);
     state.selectedEventId = null;
     saveDraft();
@@ -3091,6 +3311,7 @@ function renderTimeline() {
   renderAutomationEvents();
   renderEventEditor();
   renderTrackNavigator();
+  renderQuickEditBar();
   requestAnimationFrame(drawWaveform);
 }
 
@@ -3273,6 +3494,7 @@ function renderTimelineSelection() {
   laneStack.querySelectorAll(".clip").forEach((clip) => {
     clip.classList.toggle("selected", Number(clip.dataset.index) === state.selectedIndex);
   });
+  renderQuickEditBar();
 }
 
 function renderInspector() {
@@ -3942,12 +4164,14 @@ function splitClipAtCursor() {
     return;
   }
 
+  const replacedEnding = getEndingMarker()?.trackId === segment.id;
+  if (replacedEnding) clearMixEnding({ persist: false });
   audio.pause();
   const right = structuredClone(segment);
   right.id = createSegmentId(session, "split");
   const originalEnd = segment.end;
   const originalSourceOut = segment.sourceOut;
-  const sourceCut = roundTime(segment.sourceIn + (cursor - segment.start));
+  const sourceCut = roundTime(segment.sourceIn + (cursor - segment.start) * (segment.playbackRate || 1));
   segment.end = cursor;
   segment.sourceOut = sourceCut;
   segment.fadeOut = Math.min(0.012, (segment.end - segment.start) / 2);
@@ -3968,7 +4192,49 @@ function splitClipAtCursor() {
   saveDraft();
   renderWorkspace();
   seekTo(cursor);
-  showToast(`Corte creado en ${formatTime(cursor)} · dos fragmentos independientes`);
+  showToast(`Corte creado en ${formatTime(cursor)} · dos fragmentos independientes${replacedEnding ? " · vuelve a crear el final" : ""}`);
+}
+
+function quickTrimSelected(side) {
+  const segment = selectedSegment();
+  if (!segment) return;
+  const cursor = roundTime(audio.currentTime);
+  if (cursor <= segment.start + 0.12 || cursor >= segment.end - 0.12) {
+    showToast("Coloca el cursor dentro de la pista, a más de 0,12 s de sus bordes");
+    return;
+  }
+  const replacedEnding = getEndingMarker()?.trackId === segment.id;
+  if (replacedEnding) clearMixEnding({ persist: false });
+  const rate = clamp(Number(segment.playbackRate) || 1, 0.5, 2);
+  if (side === "in") {
+    segment.sourceIn = roundTime(segment.sourceIn + (cursor - segment.start) * rate);
+    segment.start = cursor;
+  } else {
+    segment.sourceOut = roundTime(segment.sourceOut - (segment.end - cursor) * rate);
+    segment.end = cursor;
+  }
+  normalizeFades(segment);
+  refreshSourceText(segment);
+  saveDraft();
+  renderTimeline();
+  renderInspector();
+  updateEditSummary();
+  refreshLivePreview();
+  showToast(`${side === "in" ? "Inicio" : "Final"} recortado en ${formatTime(cursor)} · original intacto${replacedEnding ? " · vuelve a crear el final" : ""}`);
+}
+
+function quickSetFade(side, input) {
+  const segment = selectedSegment();
+  if (!segment) return;
+  const maximum = Math.min(8, (segment.end - segment.start) / 2);
+  const value = roundTime(clamp(Number(input.value) || 0, 0, maximum));
+  if (side === "in") segment.fadeIn = value;
+  else segment.fadeOut = value;
+  saveDraft();
+  renderTimeline();
+  renderInspector();
+  refreshLivePreview();
+  showToast(`Fade ${side}: ${value.toFixed(2)} s`);
 }
 
 function removeSelectedClip() {
@@ -4581,6 +4847,12 @@ async function renderOfflineMix(status) {
   limiter.attack.value = 0.003;
   limiter.release.value = 0.12;
   limiter.connect(context.destination);
+  const endingGate = context.createGain();
+  endingGate.connect(limiter);
+  if (getEndingMarker()) {
+    endingGate.gain.setValueAtTime(1, Math.max(0, session.duration - 0.035));
+    endingGate.gain.linearRampToValueAtTime(0, Math.max(0.001, session.duration - 0.006));
+  }
 
   session.segments.forEach((segment) => {
     const source = sourceFor(segment);
@@ -4597,7 +4869,7 @@ async function renderOfflineMix(status) {
     for (let index = 0; index < sampleCount; index += 1) curve[index] = gainAt(segment, (index / (sampleCount - 1)) * duration);
     envelope.gain.setValueCurveAtTime(curve, segment.start, Math.max(0.02, duration));
     node.playbackRate.value = playbackRate;
-    connectProcessingGraph(context, node, segment, envelope, limiter);
+    connectProcessingGraph(context, node, segment, envelope, endingGate);
     node.start(segment.start, segment.sourceIn, duration * playbackRate);
   });
 
@@ -4855,6 +5127,46 @@ document.querySelector("#snap-grid-select").addEventListener("change", (event) =
   showToast(`Imán: ${event.target.options[event.target.selectedIndex].text}`);
 });
 document.querySelector("#split-button").addEventListener("click", splitClipAtCursor);
+document.querySelector("#quick-trim-in").addEventListener("click", () => quickTrimSelected("in"));
+document.querySelector("#quick-trim-out").addEventListener("click", () => quickTrimSelected("out"));
+document.querySelector("#quick-fade-in").addEventListener("change", (event) => quickSetFade("in", event.target));
+document.querySelector("#quick-fade-out").addEventListener("change", (event) => quickSetFade("out", event.target));
+document.querySelector("#quick-add-fx").addEventListener("click", () => {
+  const segment = selectedSegment();
+  const cursor = roundTime(audio.currentTime);
+  if (!segment || cursor < segment.start || cursor >= segment.end) {
+    showToast("Pon el cursor dentro de la pista seleccionada para añadir el efecto");
+    return;
+  }
+  addTimelineEvent(document.querySelector("#quick-fx-type").value, { segment, time: cursor });
+  refreshLivePreview();
+});
+document.querySelector("#ending-composer-toggle").addEventListener("click", () => openEndingComposer(endingComposer.hidden));
+document.querySelector("#ending-close").addEventListener("click", () => openEndingComposer(false));
+document.querySelectorAll("[data-ending-mode]").forEach((button) => button.addEventListener("click", () => {
+  endingMode = button.dataset.endingMode;
+  document.querySelectorAll("[data-ending-mode]").forEach((candidate) => {
+    const active = candidate === button;
+    candidate.classList.toggle("active", active);
+    candidate.setAttribute("aria-pressed", String(active));
+  });
+  updateEndingPreview();
+}));
+document.querySelectorAll("#ending-beats, #ending-filter, #ending-division, #ending-tail").forEach((control) => control.addEventListener("change", updateEndingPreview));
+document.querySelector("#ending-apply").addEventListener("click", () => {
+  if (endingPreviewSnapshot) { audio.pause(); restoreEndingPreview(); }
+  applyMixEnding();
+  openEndingComposer(false);
+});
+document.querySelector("#ending-remove").addEventListener("click", () => {
+  if (endingPreviewSnapshot) { audio.pause(); restoreEndingPreview(); }
+  clearMixEnding();
+  openEndingComposer(false);
+});
+document.querySelector("#ending-audition").addEventListener("click", auditionMixEnding);
+document.addEventListener("pointerdown", (event) => {
+  if (!endingComposer.hidden && !event.target.closest(".quick-edit-bar")) openEndingComposer(false);
+});
 document.querySelector("#align-button").addEventListener("click", () => applyTransition("short"));
 document.querySelector("#smart-transition-button").addEventListener("click", prepareSmartTransition);
 document.querySelector("#audition-button").addEventListener("click", auditionTransition);
@@ -4956,6 +5268,7 @@ audio.addEventListener("pause", () => {
   stopLivePreview();
   stopSpectrumAnimation();
   saveWorkspaceView();
+  if (endingPreviewSnapshot) restoreEndingPreview();
 });
 audio.addEventListener("timeupdate", () => {
   updatePlayhead();
@@ -4968,6 +5281,7 @@ audio.addEventListener("ended", () => {
   playButton.classList.remove("playing");
   stopLivePreview(true);
   stopSpectrumAnimation();
+  if (endingPreviewSnapshot) restoreEndingPreview();
 });
 window.addEventListener("resize", () => {
   applyTimelineZoom();
@@ -5004,6 +5318,7 @@ window.addEventListener("keydown", (event) => {
     addTimelineEvent(eventShortcut);
   }
   if (event.key === "Escape" && state.sourceOpen) closeSourceEditor();
+  if (event.key === "Escape" && !endingComposer.hidden) openEndingComposer(false);
   if (event.shiftKey && event.key.toLowerCase() === "p" && !isTyping) {
     event.preventDefault();
     toggleProductionDock();

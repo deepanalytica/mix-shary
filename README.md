@@ -15,11 +15,13 @@ Las canciones no forman parte del repositorio. En la versión online, usa **Subi
 3. Pulsa **Subir canciones** para añadir tus archivos de audio.
 4. Selecciona un bloque y usa **Reemplazar por mi archivo original** cuando quieras vincular una canción a una pista existente.
 5. Ordena, corta, alinea, aplica fades y efectos. El editor guarda automáticamente los cambios en este navegador.
+   - La **barra de edición rápida**, justo encima de las ondas, permite cortar en el cursor, fijar allí el inicio o el final, ajustar fades y añadir un FX únicamente a la pista seleccionada.
    - Usa **Empalme inteligente** sobre la pista entrante para detectar el golpe, alinear una frase de 8 tiempos y escuchar inmediatamente la unión.
+   - Abre **Crear final** para elegir corte seco, echo out, delay o loop roll, con filtro opcional. **Escuchar** prueba el cierre sin guardarlo; **Aplicar final** lo guarda y ajusta la duración del mix para incluir la cola del efecto. **Quitar final** restaura la duración y el fade anteriores.
    - Usa **Deshacer/Rehacer** o `Ctrl+Z` / `Ctrl+Mayús+Z` para experimentar sin perder el montaje anterior. El historial es independiente para cada proyecto abierto.
 6. Pulsa **Guardar estado exacto** para crear un punto manual al que puedas volver sin afectar los otros proyectos.
 7. Pulsa **Igualar nivel** para equilibrar los fragmentos.
-8. Exporta el resultado final con **Exportar WAV 24-bit**.
+8. Exporta el resultado final con **Exportar WAV 24-bit** o **MP3 320**.
 
 ## Mover una sesión a otro computador
 
